@@ -1,0 +1,253 @@
+import logging
+from typing import ClassVar, Dict, Any, Optional
+from datetime import datetime
+import pytz
+from abl_baseball import Baseball, BaseballLive, BaseballRecent, _parse_team_color
+from sports import SportsUpcoming
+from pathlib import Path
+
+# Constants
+ESPN_NCAA_BASEBALL_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/baseball/college-baseball/scoreboard"
+
+
+class BaseNCAABaseballManager(Baseball):
+    """Base class for NCAA Baseball managers with common functionality."""
+
+    # Class variables shared across all NCAA Baseball manager instances (Live/Recent/Upcoming)
+    # so they can share API data and coordinate warning throttling
+    _no_data_warning_logged: ClassVar[bool] = False
+    _last_warning_time: ClassVar[float] = 0
+    _warning_cooldown: ClassVar[int] = 60  # Only log warnings once per minute
+    _shared_data: ClassVar[Optional[Dict]] = None
+    _last_shared_update: ClassVar[float] = 0
+    _processed_games_cache: ClassVar[Dict] = {}  # Cache for processed game data
+    _processed_games_timestamp: ClassVar[float] = 0
+
+    espn_summary_sport_league = ("baseball", "college-baseball")
+
+    def __init__(self, config: Dict[str, Any], display_manager, cache_manager):
+        self.logger = logging.getLogger("NCAABaseball")
+        super().__init__(
+            config=config,
+            display_manager=display_manager,
+            cache_manager=cache_manager,
+            logger=self.logger,
+            sport_key="ncaa_baseball",
+        )
+
+        # Configuration is already set in base class
+        # self.logo_dir and self.update_interval are already configured
+
+        # Check display modes to determine what data to fetch
+        display_modes = self.mode_config.get("display_modes", {})
+        self.recent_enabled = display_modes.get("ncaa_baseball_recent", False)
+        self.upcoming_enabled = display_modes.get("ncaa_baseball_upcoming", False)
+        self.live_enabled = display_modes.get("ncaa_baseball_live", False)
+        self.league = "college-baseball"
+
+        self.logger.info(
+            f"Initialized NCAA Baseball manager with display dimensions: {self.display_width}x{self.display_height}"
+        )
+        self.logger.info(f"Logo directory: {self.logo_dir}")
+        self.logger.info(
+            f"Display modes - Recent: {self.recent_enabled}, Upcoming: {self.upcoming_enabled}, Live: {self.live_enabled}"
+        )
+
+    def _fetch_ncaa_baseball_api_data(self, use_cache: bool = True) -> Optional[Dict]:
+        """
+        Fetches the games Recent and Upcoming can show for NCAA Baseball -- the
+        schedule_lookback_days/schedule_lookahead_days window -- and caches them.
+
+        This method now uses background threading to prevent blocking the display.
+        """
+        now = datetime.now(pytz.utc)
+        season_year = now.year
+        if now.month < 2:
+            season_year = now.year - 1
+        # Only what Recent and Upcoming can show; see _schedule_window.
+        datestring, window = self._schedule_window()
+        # The canonical key (core espn_scoreboard_cache_key), shared with
+        # every plugin showing this league; the old one is read until it ages out.
+        cache_key = self._schedule_cache_key(datestring)
+        legacy_key = f"ncaa_baseball_schedule_{window}"
+
+        if use_cache:
+            cached_data = self._cached_schedule(cache_key, (legacy_key,))
+            if cached_data:
+                # Validate cached data structure
+                if isinstance(cached_data, dict) and "events" in cached_data:
+                    self.logger.debug(f"Using cached schedule for {season_year}")
+                    return cached_data
+                elif isinstance(cached_data, list):
+                    # Handle old cache format (list of events)
+                    self.logger.debug(
+                        f"Using cached schedule for {season_year} (legacy format)"
+                    )
+                    return {"events": cached_data}
+                else:
+                    self.logger.warning(
+                        f"Invalid cached data format for {season_year}: {type(cached_data)}"
+                    )
+                    # Clear invalid cache
+                    self.cache_manager.clear_cache(cache_key)
+
+        self.logger.info(
+            f"Fetching {season_year} schedule window from ESPN API..."
+        )
+
+        # Get background service configuration
+        background_config = self.mode_config.get("background_service", {})
+        timeout = background_config.get("request_timeout", 30)
+        max_retries = background_config.get("max_retries", 3)
+        priority = background_config.get("priority", 2)
+
+        # Start background fetch if service is available
+        if (
+            self.background_service
+            and self.background_enabled
+            and self._background_fetches_espn_ranges()
+        ):
+            # Skip if a fetch is already in progress for this season
+            if season_year in self.background_fetch_requests:
+                self.logger.debug(
+                    f"Background fetch already in progress for {season_year}"
+                )
+                partial_data = self._get_weeks_data()
+                return partial_data
+
+            self.logger.info(
+                f"Starting background fetch for {season_year} schedule window..."
+            )
+
+            def fetch_callback(result):
+                """Callback when background fetch completes."""
+                if result.success:
+                    self.logger.info(
+                        f"Background fetch completed for {season_year}: {len(result.data.get('events', []))} events"
+                    )
+                else:
+                    self.logger.error(
+                        f"Background fetch failed for {season_year}: {result.error}"
+                    )
+
+                # Clean up request tracking
+                if season_year in self.background_fetch_requests:
+                    del self.background_fetch_requests[season_year]
+
+            # Submit background fetch request
+            request_id = self.background_service.submit_fetch_request(
+                sport="ncaa_baseball",
+                year=season_year,
+                url=ESPN_NCAA_BASEBALL_SCOREBOARD_URL,
+                cache_key=cache_key,
+                params={"dates": datestring, "limit": 1000},
+                headers=self.headers,
+                timeout=timeout,
+                max_retries=max_retries,
+                priority=priority,
+                callback=fetch_callback,
+            )
+
+            # Track the request
+            self.background_fetch_requests[season_year] = request_id
+
+            # For immediate response, try to get partial data
+            partial_data = self._get_weeks_data()
+            if partial_data:
+                return partial_data
+        else:
+            # No background service, or a core that would send this range to
+            # ESPN as-is (rejected with 400 since 2026-09-15): fetch it here.
+            return self._fetch_season_directly(
+                ESPN_NCAA_BASEBALL_SCOREBOARD_URL,
+                datestring,
+                cache_key,
+                f"{season_year} season",
+                ttl=14400,
+            )
+
+    def _fetch_data(self) -> Optional[Dict]:
+        """Fetch cached season data. Subclasses may override."""
+        return self._fetch_ncaa_baseball_api_data(use_cache=True)
+
+
+class NCAABaseballLiveManager(BaseNCAABaseballManager, BaseballLive):
+    """Manager for live NCAA Baseball games."""
+
+    def __init__(self, config: Dict[str, Any], display_manager, cache_manager):
+        super().__init__(
+            config=config, display_manager=display_manager, cache_manager=cache_manager
+        )
+        self.logger = logging.getLogger("NCAABaseballLiveManager")
+
+        if self.test_mode:
+            # More detailed test game for NCAA Baseball
+            self.current_game = {
+                "id": "testNCAABB001",
+                "home_id": "2633",
+                "away_id": "2579",
+                "home_abbr": "LSU",
+                "away_abbr": "MISS",
+                "home_score": "5",
+                "away_score": "3",
+                "inning": 7,
+                "inning_half": "bottom",
+                "balls": 2,
+                "strikes": 1,
+                "outs": 1,
+                "bases_occupied": [True, False, True],
+                "home_logo_path": Path(self.logo_dir, "LSU.png"),
+                "away_logo_path": Path(self.logo_dir, "MISS.png"),
+                "is_live": True,
+                "is_final": False,
+                "is_upcoming": False,
+                "is_halftime": False,
+                "home_logo_url": "",
+                "away_logo_url": "",
+                "status_text": "Bot 7th",
+                "series_summary": "",
+                "has_count_data": False,
+                "home_linescore": ["0", "2", "0", "1", "0", "2"],
+                "away_linescore": ["1", "0", "0", "1", "1", "0", "0"],
+                "home_hits": "9",
+                "away_hits": "6",
+                "home_errors": "1",
+                "away_errors": "0",
+                # Real ESPN primary colors (LSU purple, Ole Miss red).
+                "home_team_color": _parse_team_color("461d7c"),
+                "away_team_color": _parse_team_color("ce1126"),
+            }
+            self.live_games = [self.current_game]
+            self.logger.info(
+                "Initialized NCAABaseballLiveManager with test game: MISS vs LSU"
+            )
+        else:
+            self.logger.info(
+                "Initialized NCAABaseballLiveManager in live mode"
+            )
+
+    def _fetch_data(self) -> Optional[Dict]:
+        """Live games fetch only today's games, not entire season."""
+        return self._fetch_todays_games()
+
+
+class NCAABaseballRecentManager(BaseNCAABaseballManager, BaseballRecent):
+    """Manager for recently completed NCAA Baseball games."""
+
+    def __init__(self, config: Dict[str, Any], display_manager, cache_manager):
+        super().__init__(config, display_manager, cache_manager)
+        self.logger = logging.getLogger("NCAABaseballRecentManager")
+        self.logger.info(
+            f"Initialized NCAABaseballRecentManager with {len(self.favorite_teams)} favorite teams"
+        )
+
+
+class NCAABaseballUpcomingManager(BaseNCAABaseballManager, SportsUpcoming):
+    """Manager for upcoming NCAA Baseball games."""
+
+    def __init__(self, config: Dict[str, Any], display_manager, cache_manager):
+        super().__init__(config, display_manager, cache_manager)
+        self.logger = logging.getLogger("NCAABaseballUpcomingManager")
+        self.logger.info(
+            f"Initialized NCAABaseballUpcomingManager with {len(self.favorite_teams)} favorite teams"
+        )

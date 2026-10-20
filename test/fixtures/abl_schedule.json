@@ -1,0 +1,348 @@
+{
+ "totalGames": 6,
+ "dates": [
+  {
+   "date": "2026-11-20",
+   "games": [
+    {
+     "gamePk": 900001,
+     "gameDate": "2026-11-20T07:00:00Z",
+     "officialDate": "2026-11-20",
+     "scheduledInnings": 9,
+     "status": {
+      "abstractGameState": "Final",
+      "detailedState": "Final",
+      "codedGameState": "F"
+     },
+     "teams": {
+      "away": {
+       "team": {
+        "id": 4065,
+        "name": "Brisbane Bandits",
+        "abbreviation": "BRI",
+        "teamName": "Bandits",
+        "shortName": "Brisbane",
+        "clubName": "Bandits",
+        "franchiseName": "Brisbane"
+       },
+       "score": 1,
+       "leagueRecord": {
+        "wins": 0,
+        "losses": 1,
+        "pct": "0.000"
+       }
+      },
+      "home": {
+       "team": {
+        "id": 4069,
+        "name": "Sydney Blue Sox",
+        "abbreviation": "SYD",
+        "teamName": "Blue Sox",
+        "shortName": "Sydney",
+        "clubName": "Blue Sox",
+        "franchiseName": "Sydney"
+       },
+       "score": 11,
+       "leagueRecord": {
+        "wins": 1,
+        "losses": 0,
+        "pct": "1.000"
+       }
+      }
+     },
+     "venue": {
+      "name": "Blacktown International Sportspark"
+     },
+     "linescore": {
+      "currentInning": 9,
+      "inningState": "Top",
+      "outs": 3
+     }
+    },
+    {
+     "gamePk": 900002,
+     "gameDate": "2026-11-20T08:30:00Z",
+     "officialDate": "2026-11-20",
+     "scheduledInnings": 9,
+     "status": {
+      "abstractGameState": "Final",
+      "detailedState": "Final",
+      "codedGameState": "F"
+     },
+     "teams": {
+      "away": {
+       "team": {
+        "id": 4068,
+        "name": "Perth Heat",
+        "abbreviation": "PER",
+        "teamName": "Heat",
+        "shortName": "Perth",
+        "clubName": "Heat",
+        "franchiseName": "Perth"
+       },
+       "score": 0,
+       "leagueRecord": {
+        "wins": 0,
+        "losses": 1,
+        "pct": "0.000"
+       }
+      },
+      "home": {
+       "team": {
+        "id": 4064,
+        "name": "Adelaide Giants",
+        "abbreviation": "ADE",
+        "teamName": "Giants",
+        "shortName": "Adelaide",
+        "clubName": "Giants",
+        "franchiseName": "Adelaide"
+       },
+       "score": 6,
+       "leagueRecord": {
+        "wins": 1,
+        "losses": 0,
+        "pct": "1.000"
+       }
+      }
+     },
+     "venue": {
+      "name": "Dicolor Australia Stadium"
+     },
+     "linescore": {
+      "currentInning": 9,
+      "inningState": "Top",
+      "outs": 3
+     }
+    }
+   ]
+  },
+  {
+   "date": "2026-11-21",
+   "games": [
+    {
+     "gamePk": 900003,
+     "gameDate": "2026-11-21T01:00:00Z",
+     "officialDate": "2026-11-21",
+     "scheduledInnings": 7,
+     "status": {
+      "abstractGameState": "Final",
+      "detailedState": "Final",
+      "codedGameState": "F"
+     },
+     "teams": {
+      "away": {
+       "team": {
+        "id": 4068,
+        "name": "Perth Heat",
+        "abbreviation": "PER",
+        "teamName": "Heat",
+        "shortName": "Perth",
+        "clubName": "Heat",
+        "franchiseName": "Perth"
+       },
+       "score": 9,
+       "leagueRecord": {
+        "wins": 1,
+        "losses": 1,
+        "pct": "0.500"
+       }
+      },
+      "home": {
+       "team": {
+        "id": 4064,
+        "name": "Adelaide Giants",
+        "abbreviation": "ADE",
+        "teamName": "Giants",
+        "shortName": "Adelaide",
+        "clubName": "Giants",
+        "franchiseName": "Adelaide"
+       },
+       "score": 16,
+       "leagueRecord": {
+        "wins": 2,
+        "losses": 0,
+        "pct": "1.000"
+       }
+      }
+     },
+     "venue": {
+      "name": "Dicolor Australia Stadium"
+     },
+     "linescore": {
+      "currentInning": 7,
+      "inningState": "Bottom",
+      "outs": 3
+     }
+    },
+    {
+     "gamePk": 900004,
+     "gameDate": "2026-11-21T04:00:00Z",
+     "officialDate": "2026-11-21",
+     "scheduledInnings": 9,
+     "status": {
+      "abstractGameState": "Live",
+      "detailedState": "In Progress",
+      "codedGameState": "I"
+     },
+     "teams": {
+      "away": {
+       "team": {
+        "id": 4065,
+        "name": "Brisbane Bandits",
+        "abbreviation": "BRI",
+        "teamName": "Bandits",
+        "shortName": "Brisbane",
+        "clubName": "Bandits",
+        "franchiseName": "Brisbane"
+       },
+       "score": 4,
+       "leagueRecord": {
+        "wins": 0,
+        "losses": 1,
+        "pct": "0.000"
+       }
+      },
+      "home": {
+       "team": {
+        "id": 4069,
+        "name": "Sydney Blue Sox",
+        "abbreviation": "SYD",
+        "teamName": "Blue Sox",
+        "shortName": "Sydney",
+        "clubName": "Blue Sox",
+        "franchiseName": "Sydney"
+       },
+       "score": 3,
+       "leagueRecord": {
+        "wins": 1,
+        "losses": 0,
+        "pct": "1.000"
+       }
+      }
+     },
+     "venue": {
+      "name": "Blacktown International Sportspark"
+     },
+     "linescore": {
+      "currentInning": 5,
+      "currentInningOrdinal": "5th",
+      "inningState": "Bottom",
+      "inningHalf": "Bottom",
+      "outs": 1,
+      "balls": 2,
+      "strikes": 1,
+      "offense": {
+       "first": {
+        "id": 1
+       },
+       "third": {
+        "id": 2
+       }
+      }
+     }
+    },
+    {
+     "gamePk": 900005,
+     "gameDate": "2026-11-21T08:00:00Z",
+     "officialDate": "2026-11-21",
+     "scheduledInnings": 9,
+     "status": {
+      "abstractGameState": "Preview",
+      "detailedState": "Scheduled",
+      "codedGameState": "S"
+     },
+     "teams": {
+      "away": {
+       "team": {
+        "id": 4068,
+        "name": "Perth Heat",
+        "abbreviation": "PER",
+        "teamName": "Heat",
+        "shortName": "Perth",
+        "clubName": "Heat",
+        "franchiseName": "Perth"
+       },
+       "leagueRecord": {
+        "wins": 1,
+        "losses": 1,
+        "pct": "0.500"
+       }
+      },
+      "home": {
+       "team": {
+        "id": 4064,
+        "name": "Adelaide Giants",
+        "abbreviation": "ADE",
+        "teamName": "Giants",
+        "shortName": "Adelaide",
+        "clubName": "Giants",
+        "franchiseName": "Adelaide"
+       },
+       "leagueRecord": {
+        "wins": 2,
+        "losses": 0,
+        "pct": "1.000"
+       }
+      }
+     },
+     "venue": {
+      "name": "Dicolor Australia Stadium"
+     }
+    }
+   ]
+  },
+  {
+   "date": "2026-11-22",
+   "games": [
+    {
+     "gamePk": 900006,
+     "gameDate": "2026-11-22T03:00:00Z",
+     "officialDate": "2026-11-22",
+     "scheduledInnings": 9,
+     "status": {
+      "abstractGameState": "Preview",
+      "detailedState": "Scheduled",
+      "codedGameState": "S"
+     },
+     "teams": {
+      "away": {
+       "team": {
+        "id": 4065,
+        "name": "Brisbane Bandits",
+        "abbreviation": "BRI",
+        "teamName": "Bandits",
+        "shortName": "Brisbane",
+        "clubName": "Bandits",
+        "franchiseName": "Brisbane"
+       },
+       "leagueRecord": {
+        "wins": 0,
+        "losses": 1,
+        "pct": "0.000"
+       }
+      },
+      "home": {
+       "team": {
+        "id": 4069,
+        "name": "Sydney Blue Sox",
+        "abbreviation": "SYD",
+        "teamName": "Blue Sox",
+        "shortName": "Sydney",
+        "clubName": "Blue Sox",
+        "franchiseName": "Sydney"
+       },
+       "leagueRecord": {
+        "wins": 1,
+        "losses": 0,
+        "pct": "1.000"
+       }
+      }
+     },
+     "venue": {
+      "name": "Blacktown International Sportspark"
+     }
+    }
+   ]
+  }
+ ]
+}

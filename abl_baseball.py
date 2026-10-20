@@ -1,0 +1,2808 @@
+"""
+Baseball Base Classes
+
+This module provides baseball-specific base classes that extend the core sports functionality
+with baseball-specific logic for innings, outs, bases, strikes, balls, etc.
+"""
+
+import logging
+import re
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+from PIL import Image, ImageDraw, ImageFont
+
+from baseball_activity import BaseballActivityMixin
+from baseball_celebration import BaseballCelebrationMixin
+from baseball_scorer_card import BaseballScorerCardMixin
+from data_sources import ESPNDataSource
+from sports import (
+    RESAMPLE_FILTER, SportsCore, SportsLive, SportsRecent, _resolve_font_path)
+
+# ESPN categorical play types that map unambiguously to a short code.
+CLEAN_PLAY_TYPE_MAP: Dict[str, str] = {
+    "single": "1B",
+    "double": "2B",
+    "triple": "3B",
+    "home-run": "HR",
+    "fly-out": "F",
+    "ground-out": "GO",
+    "line-out": "L",
+    "pop-out": "P",
+    "hit-by-pitch": "HBP",
+}
+
+# Walks/strikeouts (and a few other outcomes as a fallback) have no
+# dedicated ESPN `type.type` -- they land in a generic "play-result" bucket
+# and are only recoverable via keyword-matching the free-text description.
+# Ordered so more specific phrases are checked before shorter substrings
+# that could otherwise false-match (e.g. "walked" vs "walked back").
+PLAY_RESULT_KEYWORDS: List[Tuple[str, str]] = [
+    ("struck out", "K"),
+    ("walked", "BB"),
+    ("hit by pitch", "HBP"),
+    ("homered", "HR"),
+    ("tripled", "3B"),
+    ("doubled", "2B"),
+    ("singled", "1B"),
+]
+
+
+def _build_athlete_name_map(rosters: Optional[List[Dict]]) -> Dict[str, str]:
+    """Join both teams' roster lists into {athlete_id: shortName}."""
+    names: Dict[str, str] = {}
+    for team_roster in rosters or []:
+        for entry in team_roster.get("roster", []) or []:
+            athlete = entry.get("athlete", {}) or {}
+            athlete_id = str(athlete.get("id", "") or "")
+            if not athlete_id:
+                continue
+            name = athlete.get("shortName") or athlete.get("fullName") or ""
+            if name:
+                names[athlete_id] = name
+    return names
+
+
+def _get_current_pitcher_batter(
+    plays: Optional[List[Dict]], athlete_names: Dict[str, str]
+) -> Tuple[Optional[str], Optional[str]]:
+    """Scan plays backward for the most recent play naming a pitcher/batter.
+
+    The last entry in `plays` is often a transition marker (e.g. end of
+    inning) with no `participants`, so a simple `plays[-1]` lookup misses
+    the actual at-bat most of the time.
+    """
+    for play in reversed(plays or []):
+        pitcher_id = None
+        batter_id = None
+        for participant in play.get("participants") or []:
+            role = participant.get("type")
+            athlete_id = str(participant.get("athlete", {}).get("id", "") or "")
+            if not athlete_id:
+                continue
+            if role == "pitcher":
+                pitcher_id = athlete_id
+            elif role == "batter":
+                batter_id = athlete_id
+        pitcher = athlete_names.get(pitcher_id) if pitcher_id else None
+        batter = athlete_names.get(batter_id) if batter_id else None
+        if pitcher or batter:
+            return pitcher, batter
+    return None, None
+
+
+def _hand_abbr(value: Any) -> Optional[str]:
+    """Normalize an ESPN bats/throws field (dict or string) to a short code
+    like 'R'/'L'/'S'. Returns None when absent."""
+    if isinstance(value, dict):
+        return value.get("abbreviation") or value.get("displayValue") or value.get("type")
+    if isinstance(value, str) and value:
+        return value[:1].upper()
+    return None
+
+
+def _build_athlete_info_map(rosters: Optional[List[Dict]]) -> Dict[str, Dict]:
+    """Join both teams' rosters into {athlete_id: {name, jersey, position,
+    headshot_url, bat, throw, team_id, team_abbr}}.
+
+    Richer sibling of _build_athlete_name_map -- carries the extra fields the
+    player card needs (jersey/position/headshot + which team the athlete is
+    on, so the card can pick the correct team color). Kept separate so the
+    existing name-only map (and its tests) stay unchanged."""
+    info: Dict[str, Dict] = {}
+    for team_roster in rosters or []:
+        team = team_roster.get("team", {}) or {}
+        team_id = str(team.get("id", "") or "")
+        team_abbr = team.get("abbreviation") or ""
+        for entry in team_roster.get("roster", []) or []:
+            athlete = entry.get("athlete", {}) or {}
+            athlete_id = str(athlete.get("id", "") or "")
+            if not athlete_id:
+                continue
+            position = athlete.get("position") or {}
+            if isinstance(position, dict):
+                position = position.get("abbreviation") or position.get("displayName") or ""
+            headshot = (athlete.get("headshot") or {}).get("href")
+            info[athlete_id] = {
+                "name": athlete.get("shortName") or athlete.get("fullName") or "",
+                "jersey": athlete.get("jersey"),
+                "position": position or "",
+                "headshot_url": headshot,
+                "bat": _hand_abbr(athlete.get("bats")),
+                "throw": _hand_abbr(athlete.get("throws")),
+                "team_id": team_id,
+                "team_abbr": team_abbr,
+            }
+    return info
+
+
+def _get_current_pitcher_batter_ids(
+    plays: Optional[List[Dict]],
+) -> Tuple[Optional[str], Optional[str]]:
+    """Scan plays backward for the most recent play naming a pitcher/batter,
+    returning their athlete IDs (parallel to _get_current_pitcher_batter, which
+    returns names). The card needs the IDs to fetch bios/headshots."""
+    for play in reversed(plays or []):
+        pitcher_id = None
+        batter_id = None
+        for participant in play.get("participants") or []:
+            role = participant.get("type")
+            athlete_id = str(participant.get("athlete", {}).get("id", "") or "")
+            if not athlete_id:
+                continue
+            if role == "pitcher":
+                pitcher_id = athlete_id
+            elif role == "batter":
+                batter_id = athlete_id
+        if pitcher_id or batter_id:
+            return pitcher_id, batter_id
+    return None, None
+
+
+def _map_play_type(play: Dict) -> Optional[str]:
+    """Map a single play to a short code, or None on no confident match."""
+    play_type = (play.get("type") or {}).get("type", "")
+    if play_type in CLEAN_PLAY_TYPE_MAP:
+        return CLEAN_PLAY_TYPE_MAP[play_type]
+
+    text = (play.get("text") or "").lower()
+    for keyword, code in PLAY_RESULT_KEYWORDS:
+        if keyword in text:
+            return code
+    return None
+
+
+def _get_last_play_code(plays: Optional[List[Dict]]) -> Optional[str]:
+    """Return the short code for the most recently completed play, or None.
+
+    Skips trailing empty transition-marker entries (no type, no text), but
+    stops at the first substantive play and returns its mapped code -- or
+    None if that play's outcome can't be confidently mapped, rather than
+    scanning further back and risking showing a stale result.
+    """
+    for play in reversed(plays or []):
+        play_type = (play.get("type") or {}).get("type", "")
+        text = play.get("text") or ""
+        if not play_type and not text:
+            continue
+        return _map_play_type(play)
+    return None
+
+
+def _extract_linescore(team: Optional[Dict]) -> List[str]:
+    """Per-inning runs for one team, in period order, as display strings.
+
+    ESPN only includes an entry once that inning has started -- there's no
+    placeholder for innings not yet reached -- so the returned list's length
+    reflects how far the game has actually progressed.
+    """
+    if not team:
+        return []
+    linescores = team.get("linescores") or []
+    ordered = sorted(linescores, key=lambda ls: ls.get("period", 0))
+    return [str(ls.get("displayValue", ls.get("value", "0"))) for ls in ordered]
+
+
+def _extract_team_stat(team: Optional[Dict], stat_name: str) -> str:
+    """Pull a named stat (e.g. 'hits', 'errors') from a team competitor's
+    statistics array. Returns '0' if the team or stat is missing."""
+    if not team:
+        return "0"
+    for stat in team.get("statistics") or []:
+        if stat.get("name") == stat_name:
+            return str(stat.get("displayValue", "0"))
+    return "0"
+
+
+# Team primary colors from ESPN are sometimes too dark (near-black) or too
+# light (near-white) to read well against a black LED panel background;
+# clamp into a legible brightness band rather than using the raw hex.
+_MIN_COLOR_BRIGHTNESS = 90
+_MAX_COLOR_BRIGHTNESS = 235
+
+
+def _parse_team_color(hex_str: Optional[str]) -> Optional[Tuple[int, int, int]]:
+    """Parse an ESPN team color hex string (e.g. 'be0a14') into an (R, G, B)
+    tuple, brightness-clamped for legibility on a black background. Returns
+    None if the string is missing or malformed."""
+    if not hex_str:
+        return None
+    hex_str = hex_str.strip().lstrip("#")
+    if len(hex_str) != 6:
+        return None
+    try:
+        r, g, b = (int(hex_str[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return None
+
+    brightness = (r + g + b) / 3
+    if brightness < _MIN_COLOR_BRIGHTNESS and brightness > 0:
+        scale = _MIN_COLOR_BRIGHTNESS / brightness
+        r, g, b = (min(255, int(c * scale)) for c in (r, g, b))
+    elif brightness > _MAX_COLOR_BRIGHTNESS:
+        scale = _MAX_COLOR_BRIGHTNESS / brightness
+        r, g, b = (int(c * scale) for c in (r, g, b))
+    return (r, g, b)
+
+
+class Baseball(SportsCore):
+    """Base class for baseball sports with common functionality."""
+
+    # Set by league-specific base managers to opt into the ESPN per-game
+    # summary endpoint (pitcher/batter/last-play). Left None for leagues
+    # (e.g. ABL) whose live game IDs aren't ESPN IDs and have no verified
+    # summary endpoint shape.
+    espn_summary_sport_league: Optional[Tuple[str, str]] = None
+
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        display_manager,
+        cache_manager,
+        logger: logging.Logger,
+        sport_key: str,
+    ):
+        super().__init__(config, display_manager, cache_manager, logger, sport_key)
+        # Baseball-specific configuration
+        self.show_innings = self.mode_config.get("show_innings", True)
+        self.show_outs = self.mode_config.get("show_outs", True)
+        self.show_bases = self.mode_config.get("show_bases", True)
+        self.show_count = self.mode_config.get("show_count", True)
+        self.show_pitcher_batter = self.mode_config.get("show_pitcher_batter", True)
+        self.show_last_play = self.mode_config.get("show_last_play", False)
+        self.show_player_card = self.mode_config.get("show_player_card", False)
+        self.show_traditional_scoreboard = self.mode_config.get("show_traditional_scoreboard", False)
+        self.show_series_summary = self.mode_config.get("show_series_summary", False)
+        self.data_source = ESPNDataSource(logger)
+        self.sport = "baseball"
+        # Dedicated traditional-scoreboard rotating screen timing state --
+        # shared by both live and recent-games managers (see
+        # _maybe_draw_traditional_scoreboard_screen) so the screen can
+        # rotate in for live action, final/recent games, or both.
+        self._trad_scoreboard_last_shown = 0.0
+        self._trad_scoreboard_showing_until = 0.0
+
+    def _extract_game_details(self, game_event: Dict) -> Optional[Dict]:
+        """Extract relevant game details from ESPN Baseball API response."""
+        details, home_team, away_team, status, situation = (
+            self._extract_game_details_common(game_event)
+        )
+        if details is None or home_team is None or away_team is None or status is None:
+            self.logger.debug(
+                f"Skipping malformed event (missing common fields): id={game_event.get('id', '?')}"
+            )
+            return None
+        try:
+            game_status = status["type"]["name"].lower()
+            status_state = status["type"]["state"].lower()
+            # Get team abbreviations (some NCAA teams lack 'abbreviation')
+            home_abbr = home_team["team"].get("abbreviation") or (home_team["team"].get("name") or "?")[:3]
+            away_abbr = away_team["team"].get("abbreviation") or (away_team["team"].get("name") or "?")[:3]
+
+            # Check if this is a favorite team game
+            is_favorite_game = (
+                home_abbr in self.favorite_teams or away_abbr in self.favorite_teams
+            )
+
+            # Log all teams found for debugging
+            self.logger.debug(
+                f"Found game: {away_abbr} @ {home_abbr} (Status: {game_status}, State: {status_state})"
+            )
+
+            # Only log detailed information for favorite teams
+            if is_favorite_game:
+                self.logger.debug(f"Full status data: {status}")
+                self.logger.debug(f"Status type: {game_status}, State: {status_state}")
+                self.logger.debug(f"Status detail: {status['type'].get('detail', '')}")
+                self.logger.debug(
+                    f"Status shortDetail: {status['type'].get('shortDetail', '')}"
+                )
+            series = game_event["competitions"][0].get("series", None)
+            series_summary = ""
+            if series:
+                series_summary = series.get("summary", "")
+            # Get game state information
+            if status_state == "in":
+                # For live games, get detailed state. Use the already-
+                # validated `status` (competition-level, from
+                # _extract_game_details_common) rather than a separate
+                # top-level game_event["status"] lookup -- real ESPN
+                # events duplicate status in both places, but ABL's
+                # events (synthesized from the MLB Stats API into an
+                # ESPN-like shape) only ever populate the competition-level
+                # one, so the top-level lookup raised a bare KeyError.
+                inning = status.get(
+                    "period", 1
+                )  # Get inning from status period
+
+                # Get inning information from status
+                status_detail = status["type"].get("detail", "").lower()
+                status_short = status["type"].get("shortDetail", "").lower()
+
+                if is_favorite_game:
+                    self.logger.debug(
+                        f"Raw status detail: {status['type'].get('detail')}"
+                    )
+                    self.logger.debug(
+                        f"Raw status short: {status['type'].get('shortDetail')}"
+                    )
+
+                # Determine inning half from status information
+                inning_half = "top"  # Default
+
+                # Handle end of inning: next inning is top. startswith, not
+                # "in": "susp-end-ed" contains "end", which turned a game
+                # suspended in the 7th into a live "▲8".
+                if status_detail.startswith("end") or status_short.startswith("end"):
+                    inning_half = "top"
+                    inning = (
+                        status.get("period", 1) + 1
+                    )  # Use period and increment for next inning
+                    if is_favorite_game:
+                        self.logger.debug(
+                            f"Detected end of inning. Setting to Top {inning}"
+                        )
+                # Handle middle of inning: next is bottom of current inning
+                elif "mid" in status_detail or "mid" in status_short:
+                    inning_half = "bottom"
+                    if is_favorite_game:
+                        self.logger.debug(
+                            f"Detected middle of inning. Setting to Bottom {inning}"
+                        )
+                # Handle bottom of inning
+                elif (
+                    "bottom" in status_detail
+                    or "bot" in status_detail
+                    or "bottom" in status_short
+                    or "bot" in status_short
+                ):
+                    inning_half = "bottom"
+                    if is_favorite_game:
+                        self.logger.debug(f"Detected bottom of inning: {inning}")
+                # Handle top of inning
+                elif "top" in status_detail or "top" in status_short:
+                    inning_half = "top"
+                    if is_favorite_game:
+                        self.logger.debug(f"Detected top of inning: {inning}")
+
+                if is_favorite_game:
+                    self.logger.debug(f"Status detail: {status_detail}")
+                    self.logger.debug(f"Status short: {status_short}")
+                    self.logger.debug(f"Determined inning: {inning_half} {inning}")
+
+                # Get count and bases from situation
+                situation = game_event["competitions"][0].get("situation", {})
+
+                # NCAA baseball API doesn't provide count/outs data (only onFirst/onSecond/onThird)
+                # Use league identifier for deterministic detection instead of key-presence heuristic
+                has_count_data = self.league != "college-baseball"
+
+                if is_favorite_game:
+                    self.logger.debug(f"Full situation data: {situation}")
+                    self.logger.debug(f"has_count_data: {has_count_data}")
+
+                # Get count from the correct location in the API response
+                count = situation.get("count", {})
+                balls = count.get("balls", 0)
+                strikes = count.get("strikes", 0)
+                outs = situation.get("outs", 0)
+
+                # Add detailed logging for favorite team games
+                if is_favorite_game:
+                    self.logger.debug(f"Full situation data: {situation}")
+                    self.logger.debug(f"Count object: {count}")
+                    self.logger.debug(
+                        f"Raw count values - balls: {balls}, strikes: {strikes}"
+                    )
+                    self.logger.debug(f"Raw outs value: {outs}")
+
+                # Try alternative locations for count data
+                if balls == 0 and strikes == 0:
+                    # First try the summary field
+                    if "summary" in situation:
+                        try:
+                            count_summary = situation["summary"]
+                            balls, strikes = map(int, count_summary.split("-", 1))
+                            if is_favorite_game:
+                                self.logger.debug(
+                                    f"Using summary count: {count_summary}"
+                                )
+                        except (ValueError, AttributeError):
+                            if is_favorite_game:
+                                self.logger.debug("Could not parse summary count")
+                    else:
+                        # Check if count is directly in situation
+                        balls = situation.get("balls", 0)
+                        strikes = situation.get("strikes", 0)
+                        if is_favorite_game:
+                            self.logger.debug(
+                                f"Using direct situation count: balls={balls}, strikes={strikes}"
+                            )
+                            self.logger.debug(
+                                f"Full situation keys: {list(situation.keys())}"
+                            )
+
+                if is_favorite_game:
+                    self.logger.debug(f"Final count: balls={balls}, strikes={strikes}")
+
+                # Get base runners
+                bases_occupied = [
+                    situation.get("onFirst", False),
+                    situation.get("onSecond", False),
+                    situation.get("onThird", False),
+                ]
+
+                if is_favorite_game:
+                    self.logger.debug(f"Bases occupied: {bases_occupied}")
+            else:
+                # Default values for non-live games
+                inning = 1
+                inning_half = "top"
+                balls = 0
+                strikes = 0
+                outs = 0
+                bases_occupied = [False, False, False]
+                has_count_data = False
+
+            details.update(
+                {
+                    "status": game_status,
+                    "status_state": status_state,
+                    "inning": inning,
+                    "inning_half": inning_half,
+                    "balls": balls,
+                    "strikes": strikes,
+                    "outs": outs,
+                    "bases_occupied": bases_occupied,
+                    "has_count_data": has_count_data,
+                    "start_time": game_event["date"],
+                    "series_summary": series_summary,
+                    "home_linescore": _extract_linescore(home_team),
+                    "away_linescore": _extract_linescore(away_team),
+                    "home_hits": _extract_team_stat(home_team, "hits"),
+                    "home_errors": _extract_team_stat(home_team, "errors"),
+                    "away_hits": _extract_team_stat(away_team, "hits"),
+                    "away_errors": _extract_team_stat(away_team, "errors"),
+                    "home_team_color": _parse_team_color(home_team["team"].get("color")),
+                    "away_team_color": _parse_team_color(away_team["team"].get("color")),
+                }
+            )
+
+            # Basic validation (can be expanded)
+            if not details["home_abbr"] or not details["away_abbr"]:
+                self.logger.warning(
+                    f"Missing team abbreviation in event: {details['id']}"
+                )
+                return None
+
+            self.logger.debug(
+                f"Extracted: {details['away_abbr']}@{details['home_abbr']}, Status: {status['type']['name']}, Live: {details['is_live']}, Final: {details['is_final']}, Upcoming: {details['is_upcoming']}"
+            )
+
+            return details
+        except Exception as e:
+            # Log the problematic event structure if possible
+            self.logger.error(
+                f"Error extracting game details: {e} from event: {game_event.get('id')}",
+                exc_info=True,
+            )
+            return None
+
+    @staticmethod
+    def _compact_series_summary(summary: str) -> str:
+        """ESPN's series line in fewer characters, for narrow panels.
+
+        "Series tied 1-1" -> "Tied 1-1", "NYY leads series 2-1" -> "NYY 2-1",
+        "NYY wins series 4-2" -> "NYY W 4-2". Anything unrecognised just
+        loses the word "series".
+        """
+        text = re.sub(r"\bseries\s+tied\b", "Tied", summary, flags=re.I)
+        text = re.sub(r"\b(\w+)\s+leads?\s+series\b", r"\1", text, flags=re.I)
+        text = re.sub(r"\b(\w+)\s+(?:wins|won)\s+series\b", r"\1 W", text, flags=re.I)
+        return re.sub(r"\bseries\s+", "", text, flags=re.I).strip()
+
+    def _series_fonts(self, game: Optional[Dict]) -> list:
+        """Faces the series card can use, biggest first.
+
+        "Final/10" (top), the score (middle) and the series line (bottom)
+        all have to fit the panel's height, and the status and series rows
+        are both drawn in the card's time face. A large period_text font
+        therefore cannot be kept: the face is the time face, then that face
+        stepped down a pixel at a time to 8, then the 4x6 record face, and
+        any that would overlap the score are left out. The smallest is
+        always kept so the line is drawn somewhere.
+        """
+        time_font = self.fonts["time"]
+        faces = [time_font]
+        path, size = getattr(time_font, "path", None), getattr(time_font, "size", 0)
+        cache = self.__dict__.setdefault("_series_font_cache", {})
+        if path and size > 8:
+            for step in range(int(size) - 1, 7, -1):
+                try:
+                    if (path, step) not in cache:
+                        cache[(path, step)] = ImageFont.truetype(path, step)
+                    faces.append(cache[(path, step)])
+                except (OSError, ValueError):
+                    break
+        if self.fonts.get("record") is not None:
+            faces.append(self.fonts["record"])
+
+        probe = ImageDraw.Draw(Image.new("L", (1, 1)))
+        score = f"{(game or {}).get('away_score', '0')}-{(game or {}).get('home_score', '0')}"
+        box = probe.textbbox((0, 0), score, font=self.fonts["score"])
+        score_y = (self.display_height // 2
+                   - max(3, self._score_font_size() // 2 - 1)
+                   + self._get_layout_offset('score', 'y_offset'))
+        score_top, score_bottom = score_y + box[1], score_y + box[3]
+        status_y = 1 + self._get_layout_offset('status_text', 'y_offset')
+
+        def fits(font):
+            box = probe.textbbox((0, 0), "9/30 Final/10 Sg", font=font)
+            height = box[3] - box[1]
+            return (status_y + height <= score_top
+                    and height <= self.display_height - score_bottom - 1)
+
+        return [f for f in faces if fits(f)] or faces[-1:]
+
+    def _series_line(self, game: Optional[Dict]):
+        """(text, font) for the Recent card's bottom row, or None.
+
+        None means "draw the plain date as before". Otherwise the series
+        shares the date's row, since the centre of the card is the score:
+        "date - series" if that fits between the record corners, the series
+        alone if it does not, and a compact spelling of either ("Tied 1-1")
+        before the series is ever dropped. Both directions are checked: the
+        line must be narrow enough for the row and short enough to sit under
+        the score, so a large time face steps down instead of overprinting
+        it, and 4x6 is the last resort.
+        """
+        summary = str((game or {}).get("series_summary") or "").strip()
+        if not self.show_series_summary or not summary:
+            return None
+        date = SportsCore._recent_date_text(self, game)
+        compact = self._compact_series_summary(summary)
+        candidates = []
+        for text in (summary, compact):
+            if date:
+                candidates.append(f"{date} - {text}")
+            candidates.append(text)
+
+        record_font = self.fonts.get("record")
+        fonts = self._series_fonts(game)
+        for font in fonts:
+            width = self.display_width
+            if self.show_records or self.show_ranking:
+                # Records sit in both bottom corners; the line is centred, so
+                # reserve the wider of the two on each side.
+                corner = max(
+                    self._text_width(str((game or {}).get(k) or ""), record_font or font)
+                    for k in ("away_record", "home_record")
+                )
+                width -= 2 * (corner + 1)
+            for text in candidates:
+                if self._text_width(text, font) <= width:
+                    return text, font
+        return candidates[-1], fonts[-1]
+
+    def _recent_date_text(self, game: Optional[Dict]) -> str:
+        """The full-screen Recent card's bottom line. With a series line it
+        is drawn by _custom_scorebug_layout in a face that fits under the
+        score, so the date row is left empty here."""
+        if self._series_line(game) is None:
+            return super()._recent_date_text(game)
+        return ""
+
+    def _custom_scorebug_layout(self, game: dict, draw_overlay: ImageDraw.ImageDraw):
+        """Draw the series line, bottom-aligned, in the face _series_line chose."""
+        line = self._series_line(game)
+        if line is None:
+            return
+        text, font = line
+        bbox = draw_overlay.textbbox((0, 0), text, font=font)
+        x = (self.display_width - (bbox[2] - bbox[0])) // 2 - bbox[0]
+        y = self.display_height - bbox[3] + self._get_layout_offset('date', 'y_offset')
+        self._draw_text_with_outline(draw_overlay, text, (x, y), font)
+
+    def _text_width(self, text: str, font=None) -> float:
+        probe = ImageDraw.Draw(Image.new("L", (1, 1)))
+        return probe.textlength(text, font=font or self.fonts["time"])
+
+    def _maybe_draw_traditional_scoreboard_screen(self, game: Dict, force_clear: bool = False) -> bool:
+        """Rotate in the dedicated traditional-scoreboard screen if it's due.
+        Returns True if it drew (caller should skip the normal scorebug draw
+        for this frame), False otherwise."""
+        if not self.show_traditional_scoreboard:
+            return False
+        is_live = bool(game.get("is_live"))
+        is_final = bool(game.get("is_final"))
+        if not (is_live or is_final):
+            return False
+
+        cfg = self.config.get("customization", {}).get("traditional_scoreboard", {})
+
+        # game_scope lets this screen apply to only live action, only
+        # final/recent games (handy for seeing the winner and full line
+        # score at a glance), or both (default, matches original behavior).
+        game_scope = cfg.get("game_scope", "both")
+        if game_scope == "live" and not is_live:
+            return False
+        if game_scope == "recent" and not is_final:
+            return False
+
+        # favorites_only restricts this screen to games involving one of
+        # this league's favorite_teams -- independent of show_all_live,
+        # which controls the *normal* rotation separately. A user running
+        # show_all_live can still get the fancy treatment only for their
+        # own team while other teams keep the compact scorebug.
+        if cfg.get("favorites_only", False) and self.favorite_teams:
+            if (
+                game.get("home_abbr") not in self.favorite_teams
+                and game.get("away_abbr") not in self.favorite_teams
+            ):
+                return False
+
+        dwell = cfg.get("dwell_seconds", 6)
+        interval = cfg.get("interval_seconds", 30)
+
+        now = time.time()
+        showing = now < self._trad_scoreboard_showing_until
+        if not showing and now - self._trad_scoreboard_last_shown >= interval:
+            self._trad_scoreboard_last_shown = now
+            self._trad_scoreboard_showing_until = now + dwell
+            showing = True
+
+        if not showing:
+            return False
+
+        self._draw_traditional_scoreboard_screen(game, force_clear)
+        return True
+
+    @staticmethod
+    def _traditional_scoreboard_inning_window(game: Dict, max_cols: int) -> Tuple[int, int]:
+        """Return (start_inning, num_innings) to display, at most max_cols wide.
+
+        Shows the full 1..9 (or more, for extras already in progress) if it
+        fits. On a narrow display that can't fit all of it, shows a fixed
+        1..max_cols view until the game actually progresses past that point,
+        then scrolls to a trailing window ending at the current inning --
+        the same way a real fixed-width scoreboard handles extra innings.
+        """
+        away_ls = game.get("away_linescore") or []
+        home_ls = game.get("home_linescore") or []
+        current_inning = max(int(game.get("inning", 1) or 1), len(away_ls), len(home_ls), 1)
+        rightmost_needed = max(9, current_inning)
+        max_cols = max(1, max_cols)
+
+        if rightmost_needed <= max_cols:
+            return 1, rightmost_needed
+        if current_inning <= max_cols:
+            return 1, max_cols
+        return current_inning - max_cols + 1, max_cols
+
+    # Ordered largest-to-smallest fallback ladder within the same clean X11
+    # bitmap family as the default traditional-scoreboard font (9x15.bdf).
+    # BDF fonts are fixed-size bitmaps -- they can't shrink to an arbitrary
+    # computed size the way a scalable .ttf can -- so if the configured
+    # font's real (measured) row height doesn't leave room for the needed
+    # grid/panel rows on a small display, step down to the next smaller
+    # same-family sibling rather than silently losing a row off the bottom.
+    _TRADITIONAL_SCOREBOARD_FONT_FALLBACK_LADDER: List[str] = [
+        "9x15.bdf", "8x13.bdf", "7x13.bdf", "6x13.bdf",
+        "6x12.bdf", "6x10.bdf", "6x9.bdf", "5x8.bdf", "5x7.bdf",
+    ]
+
+    def _load_traditional_scoreboard_font(
+        self, font_cfg: Dict, needed_rows: int, available_height: int
+    ) -> Tuple[Any, int, int]:
+        """Load the configured font and measure it; if it doesn't leave
+        room for needed_rows on this display, step down the fallback ladder
+        (see _TRADITIONAL_SCOREBOARD_FONT_FALLBACK_LADDER) until one fits,
+        or fall back to the smallest rung as a best effort."""
+        candidates = [font_cfg.get("font", "9x15.bdf")]
+        for fallback in self._TRADITIONAL_SCOREBOARD_FONT_FALLBACK_LADDER:
+            if fallback not in candidates:
+                candidates.append(fallback)
+
+        result = None
+        for i, font_name in enumerate(candidates):
+            cfg_try = dict(font_cfg)
+            cfg_try["font"] = font_name
+            font = self._load_custom_font_from_element_config(
+                cfg_try, default_size=font_cfg.get("font_size", 24)
+            )
+            try:
+                char_w = max(3, font.getbbox("0")[2])
+                row_h = (font.getbbox("Ay")[3] - font.getbbox("Ay")[1]) + 2
+            except AttributeError:
+                char_w, row_h = 5, 10
+            result = (font, char_w, row_h)
+            if needed_rows * row_h <= available_height or i == len(candidates) - 1:
+                break
+        return result
+
+    def _load_multiline_fit_font(
+        self, font_cfg: Dict, lines: List[str], available_width: int, available_height: int
+    ) -> Tuple[Any, int]:
+        """Like _load_traditional_scoreboard_font, but for screens showing
+        arbitrary-length text (player names) rather than a fixed grid --
+        measures the *actual* strings being shown, not just a generic
+        digit, so a long name can push the fallback ladder down a rung
+        that a short one wouldn't need. Existing per-line truncation is
+        still the last-resort safety net if even the smallest rung
+        doesn't fit some especially long name."""
+        needed_rows = max(1, len(lines))
+        candidates = [font_cfg.get("font", "9x15.bdf")]
+        for fallback in self._TRADITIONAL_SCOREBOARD_FONT_FALLBACK_LADDER:
+            if fallback not in candidates:
+                candidates.append(fallback)
+
+        result = None
+        for i, font_name in enumerate(candidates):
+            cfg_try = dict(font_cfg)
+            cfg_try["font"] = font_name
+            font = self._load_custom_font_from_element_config(
+                cfg_try, default_size=font_cfg.get("font_size", 24)
+            )
+            try:
+                row_h = (font.getbbox("Ay")[3] - font.getbbox("Ay")[1]) + 3
+                max_line_w = max((font.getbbox(t)[2] for t in lines), default=0)
+            except AttributeError:
+                row_h, max_line_w = 10, available_width + 1  # force the loop to keep trying
+            result = (font, row_h)
+            fits = needed_rows * row_h <= available_height and max_line_w <= available_width
+            if fits or i == len(candidates) - 1:
+                break
+        return result
+
+    def _draw_traditional_scoreboard_screen(self, game: Dict, force_clear: bool = False) -> None:
+        """Draw a full-screen traditional ballpark scoreboard: an
+        inning-by-inning line score with R/H/E, and (for live games with
+        count data) an At Bat panel with ball/strike/out indicators."""
+        try:
+            img = Image.new("RGB", (self.display_width, self.display_height), (0, 0, 0))
+            draw = ImageDraw.Draw(img)
+
+            cfg = self.config.get("customization", {}).get("traditional_scoreboard", {})
+            margin = 1
+            is_live_now = bool(game.get("is_live")) and not game.get("is_final")
+            has_count_data = game.get("has_count_data", True)
+            # display_options.show_count drives the B and S rows, show_outs the
+            # O row; with both off there is no At Bat column at all, and the
+            # width goes back to the inning grid.
+            show_count = getattr(self, "show_count", True)
+            show_outs = getattr(self, "show_outs", True)
+            at_bat_panel_applicable = (
+                is_live_now and has_count_data and (show_count or show_outs)
+            )
+
+            # font_size acts as an optional cap, not a fixed size: by default
+            # (24, the max) this auto-fits the largest text that still fills
+            # the display. The At Bat ball/strike/out indicators live in
+            # their own column to the right of the grid (vertically aligned
+            # with the header/away/home rows) rather than needing extra rows
+            # stacked underneath, so sizing only ever has to budget for 3
+            # rows -- lower font_size to force a smaller, more consistent
+            # size instead.
+            font_size_cap = cfg.get("font_size", 24)
+            font_cfg = dict(cfg)
+            # Match config_schema.json's default explicitly -- the schema
+            # default only applies once a config UI materializes it into
+            # config.json; _load_custom_font_from_element_config's own
+            # hardcoded fallback (PressStart2P) would otherwise win whenever
+            # this key is genuinely absent (e.g. in the safety harness).
+            font_cfg.setdefault("font", "9x15.bdf")
+            available_height = self.display_height - 2 * margin
+
+            max_row_h = available_height / 3
+            effective_font_size = max(6, min(font_size_cap, round(max_row_h - 2)))
+            font_cfg["font_size"] = effective_font_size
+            font, char_w, row_h = self._load_traditional_scoreboard_font(
+                font_cfg, 3, available_height
+            )
+
+            team_col_w = char_w * 3 + 1  # 3-letter abbreviation + gap
+            rhe_col_w = char_w + 1  # R/H/E are almost always a single digit
+            gap_w = 2
+            inning_col_w = char_w + 1
+            at_bat_gap = 3
+
+            # Width of the At Bat side column -- widest row is Balls (3
+            # dots, the other two rows only ever have 2). Gaps only
+            # *between* dots, no trailing gap after the last one. The
+            # batting-team ▲/▼ indicator lives up in the header row next
+            # to the innings instead of here (see below), so it doesn't
+            # factor into this width.
+            at_bat_panel_w = 0
+            if at_bat_panel_applicable:
+                dot_d = max(2, round(row_h * 0.4))
+                # +1 safety margin: PIL's draw.ellipse() is inclusive of
+                # both endpoints, so each dot actually consumes dot_d + 1
+                # px, not dot_d -- without this, the last dot's right edge
+                # lands exactly on the calculated boundary with zero slack.
+                at_bat_panel_w = font.getbbox("B ")[2] + 3 * dot_d + 2 * 2 + 1
+            at_bat_block_w = (at_bat_panel_w + at_bat_gap) if at_bat_panel_applicable else 0
+
+            # Factor the At Bat column into the inning-column budget (like
+            # team_col_w/rhe_col_w already are) so a narrow display shows
+            # fewer innings to make room for it, rather than losing it.
+            # But if even a single inning column still wouldn't fit
+            # alongside it (a very narrow display, e.g. 64px wide), drop
+            # the At Bat column entirely rather than clipping it off the
+            # edge -- the grid itself always takes priority.
+            min_fixed_w = team_col_w + 3 * rhe_col_w + gap_w
+            if at_bat_block_w and min_fixed_w + at_bat_block_w + inning_col_w > self.display_width - 2 * margin:
+                at_bat_panel_applicable = False
+                at_bat_panel_w = 0
+                at_bat_block_w = 0
+
+            avail_cols = self.display_width - 2 * margin - at_bat_block_w - min_fixed_w
+            max_cols = max(1, avail_cols // inning_col_w) if inning_col_w > 0 else 1
+            start_inning, num_cols = self._traditional_scoreboard_inning_window(game, max_cols)
+
+            text_color = tuple(cfg.get("text_color", [255, 255, 255]))
+            header_color = tuple(cfg.get("header_color", [180, 180, 180]))
+            highlight_color = tuple(cfg.get("highlight_color", [255, 140, 0]))
+            use_team_colors = cfg.get("use_team_colors", True)
+            away_color = (
+                (use_team_colors and game.get("away_team_color")) or text_color
+            )
+            home_color = (
+                (use_team_colors and game.get("home_team_color")) or text_color
+            )
+
+            current_inning = int(game.get("inning", 1) or 1)
+
+            away_abbr = (game.get("away_abbr") or "")[:3]
+            home_abbr = (game.get("home_abbr") or "")[:3]
+            away_ls = game.get("away_linescore") or []
+            home_ls = game.get("home_linescore") or []
+
+            def cell_value(linescore: List[str], inning_num: int) -> str:
+                idx = inning_num - 1
+                if 0 <= idx < len(linescore):
+                    return linescore[idx]
+                return ""
+
+            # Small team logos beside the abbreviations, but only when
+            # there's leftover width to spare -- unlike the At Bat column
+            # (which is worth shrinking the grid's inning count for), a
+            # logo is a nice-to-have that shouldn't cost a displayed
+            # inning. Check against the layout already decided above
+            # (At Bat column + grid + RHE) before adding anything.
+            away_logo = home_logo = None
+            logo_size = 0
+            logo_gap = 2
+            if cfg.get("show_logos", True):
+                base_content_w = at_bat_block_w + team_col_w + num_cols * inning_col_w + gap_w + 3 * rhe_col_w
+                spare_w = self.display_width - 2 * margin - base_content_w
+                candidate_logo_size = max(4, row_h - 2)
+                if spare_w >= candidate_logo_size + logo_gap:
+                    try:
+                        away_logo_full = self._load_and_resize_logo(
+                            game.get("away_id"), game.get("away_abbr"),
+                            game.get("away_logo_path"), game.get("away_logo_url"),
+                        )
+                        home_logo_full = self._load_and_resize_logo(
+                            game.get("home_id"), game.get("home_abbr"),
+                            game.get("home_logo_path"), game.get("home_logo_url"),
+                        )
+                        if away_logo_full and home_logo_full:
+                            # Copy before thumbnailing -- _load_and_resize_logo
+                            # caches and returns the SAME Image object used
+                            # by other screens (e.g. the full-size scorebug);
+                            # thumbnailing in place would permanently shrink
+                            # their copy too.
+                            away_logo = away_logo_full.copy()
+                            away_logo.thumbnail((candidate_logo_size, candidate_logo_size), RESAMPLE_FILTER)
+                            home_logo = home_logo_full.copy()
+                            home_logo.thumbnail((candidate_logo_size, candidate_logo_size), RESAMPLE_FILTER)
+                            logo_size = candidate_logo_size
+                    except Exception as e:
+                        self.logger.debug(f"Traditional scoreboard: skipping logos ({e})")
+                        away_logo = home_logo = None
+
+            logo_w = (logo_size + logo_gap) if (away_logo and home_logo) else 0
+            team_col_w += logo_w
+
+            # Center the whole block (At Bat column + team/logo + grid +
+            # RHE) horizontally -- num_cols is capped at 9 (a standard
+            # game), so a display much wider than that would otherwise
+            # leave everything jammed against the left edge with a large
+            # dead area on the right. Centering the combined block (rather
+            # than just the grid) keeps padding minimal on both sides
+            # instead of wasting half the leftover space to the left of
+            # content that isn't actually flush-left to begin with.
+            content_w = team_col_w + num_cols * inning_col_w + gap_w + 3 * rhe_col_w + at_bat_block_w
+            x_offset = max(margin, (self.display_width - content_w) // 2)
+
+            team_x = x_offset
+            grid_x = team_x + team_col_w
+            header_y = margin
+            away_y = header_y + row_h
+            home_y = away_y + row_h
+
+            # Subtle team-color wash behind each team's row, plus a solid
+            # accent strip on the left edge -- drawn FIRST (before text,
+            # dividers, logos, and the At Bat panel) so everything else
+            # prints cleanly on top. The wash is dimmed to ~12% brightness so
+            # the black-outlined white text stays legible over it; the strip
+            # uses the full (already brightness-clamped) team color. Gated by
+            # use_team_colors (shared with the abbreviation coloring) and a
+            # dedicated show_team_color_backgrounds toggle; a team with no
+            # ESPN color simply gets no wash rather than a wrong one.
+            if use_team_colors and cfg.get("show_team_color_backgrounds", True):
+                # A 1px strip would collide with a flush-left abbreviation
+                # (no logo); keep it 1px there, otherwise scale with the font.
+                strip_w = max(1, char_w // 3) if logo_w else 1
+                grid_x_end = x_offset + content_w - 1
+                for row_y, tc in (
+                    (away_y, game.get("away_team_color")),
+                    (home_y, game.get("home_team_color")),
+                ):
+                    if not tc:
+                        continue
+                    tint = tuple(max(0, int(c * 0.12)) for c in tc)
+                    draw.rectangle(
+                        [x_offset, row_y, grid_x_end, row_y + row_h - 1], fill=tint
+                    )
+                    draw.rectangle(
+                        [x_offset, row_y, x_offset + strip_w - 1, row_y + row_h - 1],
+                        fill=tuple(tc),
+                    )
+
+            # Inning-number header + per-inning score rows.
+            for col in range(num_cols):
+                inning_num = start_inning + col
+                cell_x = grid_x + col * inning_col_w
+                is_current_col = is_live_now and inning_num == current_inning
+                col_color = highlight_color if is_current_col else header_color
+                self._draw_text_with_outline(
+                    draw, str(inning_num), (cell_x, header_y), font, fill=col_color
+                )
+                away_val = cell_value(away_ls, inning_num)
+                if away_val:
+                    self._draw_text_with_outline(draw, away_val, (cell_x, away_y), font, fill=text_color)
+                home_val = cell_value(home_ls, inning_num)
+                if home_val:
+                    self._draw_text_with_outline(draw, home_val, (cell_x, home_y), font, fill=text_color)
+
+            # Small team logos (when there was spare width for them, see
+            # above), then abbreviations -- shifted right past the logos.
+            if away_logo:
+                img.paste(away_logo, (team_x, away_y + (row_h - away_logo.height) // 2), away_logo)
+            if home_logo:
+                img.paste(home_logo, (team_x, home_y + (row_h - home_logo.height) // 2), home_logo)
+            abbr_x = team_x + logo_w
+            self._draw_text_with_outline(draw, away_abbr, (abbr_x, away_y), font, fill=away_color)
+            self._draw_text_with_outline(draw, home_abbr, (abbr_x, home_y), font, fill=home_color)
+
+            # R / H / E columns.
+            rhe_x = grid_x + num_cols * inning_col_w + gap_w
+            at_bat_x = rhe_x + 3 * rhe_col_w + at_bat_gap
+            for i, label in enumerate(("R", "H", "E")):
+                col_x = rhe_x + i * rhe_col_w
+                self._draw_text_with_outline(draw, label, (col_x, header_y), font, fill=header_color)
+            away_rhe = (str(game.get("away_score", "0")), game.get("away_hits", "0"), game.get("away_errors", "0"))
+            home_rhe = (str(game.get("home_score", "0")), game.get("home_hits", "0"), game.get("home_errors", "0"))
+
+            # On a final game, call out the winner's run total at a glance
+            # (e.g. for game_scope: "recent") instead of making the viewer
+            # read and compare both R values themselves.
+            away_run_color = home_run_color = text_color
+            if game.get("is_final") and cfg.get("highlight_winner", True):
+                try:
+                    away_runs, home_runs = int(game.get("away_score", 0) or 0), int(game.get("home_score", 0) or 0)
+                except (TypeError, ValueError):
+                    away_runs = home_runs = None
+                if away_runs is not None and away_runs != home_runs:
+                    winner_color = tuple(cfg.get("winner_color", [0, 200, 0]))
+                    if away_runs > home_runs:
+                        away_run_color = winner_color
+                    else:
+                        home_run_color = winner_color
+
+            for i, val in enumerate(away_rhe):
+                color = away_run_color if i == 0 else text_color
+                self._draw_text_with_outline(draw, str(val), (rhe_x + i * rhe_col_w, away_y), font, fill=color)
+            for i, val in enumerate(home_rhe):
+                color = home_run_color if i == 0 else text_color
+                self._draw_text_with_outline(draw, str(val), (rhe_x + i * rhe_col_w, home_y), font, fill=color)
+
+            # Grid divider lines (team | innings | R H E columns, and
+            # header/away/home rows) -- drawn last so they cleanly overwrite
+            # any outline bleed from the text above rather than being drawn
+            # over by it, keeping every line crisp and unbroken.
+            if cfg.get("show_dividers", True):
+                divider_color = tuple(cfg.get("divider_color", [90, 90, 90]))
+                grid_left = team_x
+                grid_right = rhe_x + 3 * rhe_col_w - 1
+                grid_bottom = home_y + row_h - 1
+
+                col_boundaries = [grid_x - 1]
+                col_boundaries.extend(
+                    grid_x + col * inning_col_w - 1 for col in range(1, num_cols)
+                )
+                col_boundaries.append(rhe_x - 1)
+                col_boundaries.append(rhe_x + rhe_col_w - 1)
+                col_boundaries.append(rhe_x + 2 * rhe_col_w - 1)
+                for vx in col_boundaries:
+                    if grid_left <= vx <= grid_right:
+                        draw.line([(vx, header_y), (vx, grid_bottom)], fill=divider_color)
+
+                for hy in (away_y - 1, home_y - 1):
+                    draw.line([(grid_left, hy), (grid_right, hy)], fill=divider_color)
+
+            # At Bat column: ball/strike/out indicators, only for a live
+            # game with count data (NCAA's feed doesn't provide balls/
+            # strikes). Always to the right of the grid (past RHE),
+            # vertically aligned with the header/away/home rows.
+            if at_bat_panel_applicable:
+                self._draw_traditional_scoreboard_at_bat_side_panel(
+                    draw, game, font, row_h, at_bat_x, header_y, away_y, home_y, text_color, highlight_color,
+                    show_count=show_count, show_outs=show_outs,
+                )
+                # Batting-team ▲/▼ indicator, in the header row's team
+                # column -- otherwise-empty space right above the team
+                # abbreviations, next to the inning numbers. It is the
+                # half-inning, so display_options.show_innings governs it.
+                if getattr(self, "show_innings", True):
+                    inning_half = (game.get("inning_half") or "top").lower()
+                    at_bat_indicator = "▲" if inning_half == "top" else "▼"
+                    self._draw_text_with_outline(
+                        draw, at_bat_indicator, (team_x, header_y), font, fill=highlight_color
+                    )
+
+            self.display_manager.image.paste(img, (0, 0))
+            self.display_manager.update_display()
+
+        except Exception as e:
+            self.logger.error(f"Error drawing traditional scoreboard screen: {e}", exc_info=True)
+
+    def _draw_traditional_scoreboard_at_bat_side_panel(
+        self, draw, game: Dict, font, row_h: int, x: int,
+        header_y: int, away_y: int, home_y: int,
+        text_color: tuple, highlight_color: tuple,
+        show_count: bool = True, show_outs: bool = True,
+    ) -> None:
+        """Draw ball/strike/out indicators as a compact vertical column to
+        the right of the grid, one row each aligned with the header/away/
+        home rows -- keeps the whole screen to 3 rows of vertical space so
+        the grid's auto-fit font can render as big as possible, instead of
+        needing extra rows stacked below for these indicators. The
+        batting-team ▲/▼ indicator is drawn separately, up in the header
+        row next to the innings (see _draw_traditional_scoreboard_screen)."""
+        balls = min(int(game.get("balls", 0) or 0), 3)
+        strikes = min(int(game.get("strikes", 0) or 0), 2)
+        outs = min(int(game.get("outs", 0) or 0), 2)
+
+        dot_d = max(2, round(row_h * 0.4))
+
+        def draw_row(y: int, label: str, lit: int, total: int) -> None:
+            self._draw_text_with_outline(draw, label, (x, y), font, fill=text_color)
+            dx = x + font.getbbox(label + " ")[2]
+            for i in range(total):
+                color = highlight_color if i < lit else (60, 60, 60)
+                draw.ellipse([dx, y + 1, dx + dot_d, y + 1 + dot_d], fill=color)
+                dx += dot_d + 2
+
+        # Rows keep their slots when one is hidden, so B, S and O stay level
+        # with the header/away/home rows they have always sat beside.
+        if show_count:
+            draw_row(header_y, "B", balls, 3)
+            draw_row(away_y, "S", strikes, 2)
+        if show_outs:
+            draw_row(home_y, "O", outs, 2)
+
+
+
+class BaseballRecent(Baseball, SportsRecent):
+    """Base class for recent baseball games."""
+
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        display_manager,
+        cache_manager,
+        logger: logging.Logger,
+        sport_key: str,
+    ):
+        super().__init__(config, display_manager, cache_manager, logger, sport_key)
+
+    def _draw_scorebug_layout(self, game: Dict, force_clear: bool = False) -> None:
+        if self._maybe_draw_traditional_scoreboard_screen(game, force_clear):
+            return
+        if self._series_line(game) is None:
+            super()._draw_scorebug_layout(game, force_clear)
+            return
+        # The status row and the series row share the time face; draw the
+        # card in the one that leaves the score visible between them.
+        original = self.fonts["time"]
+        self.fonts["time"] = self._series_fonts(game)[0]
+        try:
+            super()._draw_scorebug_layout(game, force_clear)
+        finally:
+            self.fonts["time"] = original
+
+
+class BaseballLive(BaseballActivityMixin, BaseballScorerCardMixin, BaseballCelebrationMixin,
+                   Baseball, SportsLive):
+    """Base class for live baseball games."""
+
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        display_manager,
+        cache_manager,
+        logger: logging.Logger,
+        sport_key: str,
+    ):
+        super().__init__(config, display_manager, cache_manager, logger, sport_key)
+        # Pitcher/batter/last-play: keyed by game id, holds the resolved
+        # {"pitcher", "batter", "last_play_code"}. Kept separate from
+        # current_game/live_games since those get fully rebuilt from fresh
+        # scoreboard data on every poll and would silently drop extra keys.
+        self._play_by_play_cache: Dict[str, Dict] = {}
+        self._play_by_play_last_attempt: Dict[str, float] = {}
+        self.play_by_play_update_interval = self.mode_config.get(
+            "play_by_play_update_interval", 20
+        )
+        # Dedicated at-bat-info rotating screen timing state.
+        self._at_bat_screen_last_shown = 0.0
+        self._at_bat_screen_showing_until = 0.0
+        # Player-card rotating screen: timing state + a resolved-bio cache
+        # (keyed by athlete id) and a per-id fetch throttle. Bios change rarely
+        # so they're cached via the core cache_manager with a long TTL as well.
+        self._player_card_last_shown = 0.0
+        self._player_card_showing_until = 0.0
+        self._player_bio_cache: Dict[str, Optional[Dict]] = {}
+        self._player_bio_last_attempt: Dict[str, float] = {}
+        self._headshot_last_attempt: Dict[str, float] = {}
+        self.player_bio_update_interval = self.mode_config.get(
+            "player_bio_update_interval", 300
+        )
+        self._headshot_mgr = None  # lazily created in the render path
+        self._init_celebration()
+        self._init_scorer_card()
+        self._init_game_activity()
+
+    def _at_bat_card_style(self) -> str:
+        """'card' (the default) draws the pitcher/batter screen as a full
+        player card -- headshot, team, vitals, season stats; 'text' restores
+        the original two-line "Pitcher: X / Batter: Y" layout."""
+        cfg = self.config.get("customization", {}).get("at_bat_info", {})
+        return str(cfg.get("style", "card")).lower()
+
+    def _wants_player_bios(self) -> bool:
+        """True when some enabled screen needs the extra ESPN athlete lookup.
+        The pitcher/batter screen only needs it in card style -- the text
+        layout has always run off the play-by-play roster names alone, and
+        users who switch back to it should not keep paying for the fetch."""
+        if self.show_player_card:
+            return True
+        return self.show_pitcher_batter and self._at_bat_card_style() == "card"
+
+    def update(self):
+        super().update()
+        # Every included live game, after the poll has refreshed live_games.
+        self._check_scores_of_live_games()
+        self._check_scorer_cards()
+        if self.test_mode:
+            return
+        if self.show_game_activity and self.espn_summary_sport_league:
+            self._poll_game_activity()
+        pbp_wanted = self.show_pitcher_batter or self.show_last_play or self.show_player_card
+        if not pbp_wanted:
+            return
+        if not self.espn_summary_sport_league:
+            return
+        if not self.current_game:
+            return
+
+        game_id = self.current_game.get("id")
+        if not game_id:
+            return
+
+        now = time.time()
+        last_attempt = self._play_by_play_last_attempt.get(game_id, 0)
+        if now - last_attempt >= self.play_by_play_update_interval:
+            self._play_by_play_last_attempt[game_id] = now
+            self._fetch_play_by_play(game_id)
+
+        # Lazily enrich the current batter/pitcher with a full bio (season
+        # stats) for the player cards -- only for the two current athlete IDs,
+        # throttled, so we never hammer the athlete API from the render loop.
+        if self._wants_player_bios():
+            pbp = self._play_by_play_cache.get(game_id) or {}
+            for pid, info in (
+                (pbp.get("batter_id"), pbp.get("batter_info")),
+                (pbp.get("pitcher_id"), pbp.get("pitcher_info")),
+            ):
+                if not pid:
+                    continue
+                last = self._player_bio_last_attempt.get(pid, 0)
+                if now - last >= self.player_bio_update_interval:
+                    self._player_bio_last_attempt[pid] = now
+                    self._fetch_player_bio(pid)
+                # Warm the headshot disk cache off-thread so the render path
+                # (load_headshot with allow_download=False) never blocks on a
+                # network fetch when a new batter/pitcher rotates in.
+                bio = self._player_bio_cache.get(pid) or {}
+                url = bio.get("headshot_url") or (info or {}).get("headshot_url")
+                if url and now - self._headshot_last_attempt.get(pid, 0) >= self.player_bio_update_interval:
+                    self._headshot_last_attempt[pid] = now
+                    self._prefetch_headshot(pid, url)
+
+        self._prune_stale_play_by_play()
+
+    # ESPN status names (lower-cased, as _extract_game_details stores them in
+    # "status") for games that stopped without finishing. ABL's converter
+    # maps its detailedState onto the same names.
+    _NOT_PLAYED_STATUSES = frozenset({
+        "status_postponed", "status_canceled", "status_cancelled",
+        "status_suspended", "status_abandoned",
+    })
+
+    def _is_game_really_over(self, game: Dict) -> bool:
+        """A suspended/postponed game is over for the live rotation.
+
+        The shared live loop still treats any raw ESPN state "in" as live,
+        so a game ESPN reports as suspended mid-inning would otherwise cycle
+        a frozen count all day: last_seen refreshes on every poll, so the
+        stale-game timeout never clears it.
+        """
+        if str(game.get("status") or "").lower() in self._NOT_PLAYED_STATUSES:
+            return True
+        return super()._is_game_really_over(game)
+
+    def _keep_final_for_vegas(self, details: Dict) -> None:
+        """Not for a suspended/postponed game: it is not over, only paused.
+
+        Such a game leaves the live list through _is_game_really_over above.
+        Held, it would stay on the Vegas ticker as a finished game for the
+        core's FINISHED_GAME_TTL, and would read FINAL if its details said so.
+        """
+        if str(details.get("status") or "").lower() in self._NOT_PLAYED_STATUSES:
+            return
+        # The one place a game going final is seen with its details: a
+        # favourite that won it earns the win celebration on the way out.
+        self._check_for_win(details)
+        super()._keep_final_for_vegas(details)
+
+    def display(self, force_clear: bool = False) -> bool:
+        """A run, home run or win takes the panel; otherwise the scorebug."""
+        if not self.is_enabled:
+            return False
+        if self._celebration_display(force_clear):
+            return True
+        return super().display(force_clear)
+
+    def _count_bdf_font(self):
+        """A private 7px 5x7 BDF face for the balls-strikes count.
+
+        This used to call set_char_size on display_manager.calendar_font,
+        resizing the one face every other user of calendar_font shares. Load
+        our own copy from the same file instead; if that is not possible use
+        the shared face as it is, without touching it.
+        """
+        face = getattr(self, "_count_font_face", None)
+        if face is not None:
+            return face
+        shared = self.display_manager.calendar_font
+        face = shared
+        # Not every display manager records where the face came from (the
+        # safety harness's does not); both load the core's bundled 5x7.bdf.
+        path = (getattr(self.display_manager, "calendar_font_path", None)
+                or "assets/fonts/5x7.bdf")
+        try:
+            import freetype
+
+            private = freetype.Face(_resolve_font_path(path))
+            private.set_char_size(height=7 * 64)
+            face = private
+        except Exception as e:  # missing freetype/file: keep the shared face
+            self.logger.debug(f"Using shared calendar_font for the count: {e}")
+        self._count_font_face = face
+        return face
+
+    def _prune_stale_play_by_play(self) -> None:
+        """Drop cached/attempted entries for games no longer live so this
+        doesn't grow unbounded across a long-running session."""
+        live_ids = {g.get("id") for g in self.live_games}
+        for gid in list(self._play_by_play_cache.keys()):
+            if gid not in live_ids:
+                del self._play_by_play_cache[gid]
+        for gid in list(self._play_by_play_last_attempt.keys()):
+            if gid not in live_ids:
+                del self._play_by_play_last_attempt[gid]
+
+    def _fetch_play_by_play(self, game_id: str) -> None:
+        """Fetch and parse the ESPN game summary for one game, off-thread.
+
+        Mirrors SportsCore._fetch_odds's background-thread-with-bounded-
+        timeout pattern (sports.py) so a slow/heavy per-game summary
+        response can never block the render/update loop -- on timeout or
+        error we simply keep whatever was cached from the previous
+        successful fetch (or nothing, if there wasn't one yet).
+        """
+        import threading
+        import queue
+
+        sport, league = self.espn_summary_sport_league
+        result_queue = queue.Queue()
+
+        def fetch():
+            try:
+                data = self.data_source.fetch_game_summary(sport, league, game_id)
+                result_queue.put(("success", data))
+            except Exception as e:
+                result_queue.put(("error", e))
+
+        thread = threading.Thread(target=fetch)
+        thread.daemon = True
+        thread.start()
+
+        try:
+            result_type, result_data = result_queue.get(timeout=2.0)
+        except queue.Empty:
+            self.logger.debug(
+                f"Play-by-play fetch timed out for game {game_id} (non-blocking)"
+            )
+            return
+
+        if result_type != "success" or not result_data:
+            self.logger.debug(
+                f"Play-by-play fetch failed for game {game_id}: {result_data}"
+            )
+            return
+
+        try:
+            plays = result_data.get("plays") or []
+            rosters = result_data.get("rosters") or []
+            athlete_names = _build_athlete_name_map(rosters)
+            pitcher, batter = _get_current_pitcher_batter(plays, athlete_names)
+            last_play_code = _get_last_play_code(plays)
+            # Extra plumbing for the player card: the athlete IDs of the
+            # current pitcher/batter plus their roster info (jersey, position,
+            # headshot, team). Cheap to compute here alongside the names; the
+            # card's season-stats bio is fetched lazily/separately.
+            info_map = _build_athlete_info_map(rosters)
+            pitcher_id, batter_id = _get_current_pitcher_batter_ids(plays)
+            if pitcher or batter or last_play_code:
+                self._play_by_play_cache[game_id] = {
+                    "pitcher": pitcher,
+                    "batter": batter,
+                    "last_play_code": last_play_code,
+                    "pitcher_id": pitcher_id,
+                    "batter_id": batter_id,
+                    "pitcher_info": info_map.get(pitcher_id) if pitcher_id else None,
+                    "batter_info": info_map.get(batter_id) if batter_id else None,
+                }
+            else:
+                self.logger.debug(
+                    f"Play-by-play response for game {game_id} had no usable "
+                    "pitcher/batter/last-play data; keeping prior cache entry"
+                )
+        except Exception as e:
+            self.logger.error(f"Error parsing play-by-play for game {game_id}: {e}")
+
+    def _fetch_player_bio(self, player_id: str) -> None:
+        """Fetch and cache a player's bio + season stats for the player card,
+        off-thread with a bounded timeout (same non-blocking pattern as
+        _fetch_play_by_play). Results persist in-memory and, via the core
+        cache_manager, across restarts. Stores None on a definitive miss so we
+        don't refetch a player with no ESPN athlete record every interval."""
+        if not player_id or not self.espn_summary_sport_league:
+            return
+
+        # Serve from the durable cache first (bios rarely change).
+        cache_key = f"baseball_player_{player_id}"
+        if player_id not in self._player_bio_cache and self.cache_manager is not None:
+            try:
+                cached = self.cache_manager.get(cache_key)
+                if cached is not None:
+                    self._player_bio_cache[player_id] = cached or None
+                    return
+            except Exception as e:
+                self.logger.debug(f"Player bio cache read failed for {player_id}: {e}")
+
+        import threading
+        import queue
+
+        sport, league = self.espn_summary_sport_league
+        result_queue = queue.Queue()
+
+        def fetch():
+            try:
+                data = self.data_source.fetch_player_details(sport, league, player_id)
+                result_queue.put(("success", data))
+            except Exception as e:
+                result_queue.put(("error", e))
+
+        thread = threading.Thread(target=fetch, daemon=True)
+        thread.start()
+
+        try:
+            result_type, result_data = result_queue.get(timeout=2.0)
+        except queue.Empty:
+            self.logger.debug(f"Player bio fetch timed out for {player_id} (non-blocking)")
+            return
+
+        if result_type != "success":
+            self.logger.debug(f"Player bio fetch failed for {player_id}: {result_data}")
+            return
+
+        self._player_bio_cache[player_id] = result_data or None
+        if self.cache_manager is not None:
+            try:
+                self.cache_manager.set(
+                    cache_key, result_data or {}, ttl=self.player_bio_update_interval
+                )
+            except Exception as e:
+                self.logger.debug(f"Player bio cache write failed for {player_id}: {e}")
+
+    def _prefetch_headshot(self, player_id: str, url: str) -> None:
+        """Warm the on-disk headshot cache in a daemon thread so the render
+        path only ever does synchronous cache reads (mirrors the non-blocking
+        background pattern used for play-by-play and bios). Fire-and-forget:
+        failures are swallowed inside load_headshot's own logging."""
+        mgr = self._get_headshot_manager()
+        if mgr is None or not self.espn_summary_sport_league:
+            return
+        _, league = self.espn_summary_sport_league
+        import threading
+
+        def warm():
+            try:
+                # max_size here only affects the (render-unused) in-memory entry;
+                # the download writes the full image to disk, which the render
+                # path then reads and crops at its own tier size.
+                mgr.load_headshot(
+                    str(player_id), url, league=league, max_size=48, allow_download=True
+                )
+            except Exception as e:
+                self.logger.debug(f"Headshot prefetch failed for {player_id}: {e}")
+
+        threading.Thread(target=warm, daemon=True).start()
+
+    # Sample data cycled through in test_mode so the at-bat info screen's
+    # real draw path (font/color/dwell/interval config) gets exercised
+    # offline, with zero network calls.
+    _TEST_MODE_AT_BAT_SAMPLES = [
+        {
+            "pitcher": "G. Cole", "batter": "J. Soto", "last_play_code": "1B",
+            "pitcher_id": "p_cole", "batter_id": "b_soto",
+            "pitcher_info": {"name": "G. Cole", "jersey": "45", "position": "SP",
+                             "bat": "R", "throw": "R", "team_id": "away"},
+            "batter_info": {"name": "J. Soto", "jersey": "22", "position": "RF",
+                            "bat": "L", "throw": "L", "team_id": "home"},
+        },
+        {
+            "pitcher": "G. Cole", "batter": "A. Judge", "last_play_code": "K",
+            "pitcher_id": "p_cole", "batter_id": "b_judge",
+            "pitcher_info": {"name": "G. Cole", "jersey": "45", "position": "SP",
+                             "bat": "R", "throw": "R", "team_id": "away"},
+            "batter_info": {"name": "A. Judge", "jersey": "99", "position": "CF",
+                            "bat": "R", "throw": "R", "team_id": "home"},
+        },
+        {
+            "pitcher": "Y. Yamamoto", "batter": "F. Freeman", "last_play_code": "HR",
+            "pitcher_id": "p_yama", "batter_id": "b_freeman",
+            "pitcher_info": {"name": "Y. Yamamoto", "jersey": "18", "position": "SP",
+                             "bat": "R", "throw": "R", "team_id": "home"},
+            "batter_info": {"name": "F. Freeman", "jersey": "5", "position": "1B",
+                            "bat": "L", "throw": "R", "team_id": "away"},
+        },
+        {
+            "pitcher": "Y. Yamamoto", "batter": "M. Betts", "last_play_code": "BB",
+            "pitcher_id": "p_yama", "batter_id": "b_betts",
+            "pitcher_info": {"name": "Y. Yamamoto", "jersey": "18", "position": "SP",
+                             "bat": "R", "throw": "R", "team_id": "home"},
+            "batter_info": {"name": "M. Betts", "jersey": "50", "position": "SS",
+                            "bat": "R", "throw": "R", "team_id": "away"},
+        },
+    ]
+
+    # Stub bios (season stats) keyed by the test athlete ids above, so the
+    # player card's full render path runs offline. Headshots resolve to None
+    # without a network -- exercising the text-only card layout.
+    _TEST_MODE_PLAYER_BIOS = {
+        "b_soto": {"display_name": "Juan Soto", "jersey": "22", "position": "RF",
+                   "bat": "L", "throw": "L", "headshot_url": None,
+                   "age": 27, "birthplace": "Santo Domingo, DR",
+                   "height": "6' 0\"", "weight": "224 lbs",
+                   "experience": "9th Season", "team_abbr": "NYM",
+                   "stats": {"AVG": ".288", "HR": "41", "RBI": "109"}},
+        "b_judge": {"display_name": "Aaron Judge", "jersey": "99", "position": "CF",
+                    "bat": "R", "throw": "R", "headshot_url": None,
+                    "age": 34, "birthplace": "Linden, CA",
+                    "height": "6' 7\"", "weight": "282 lbs",
+                    "experience": "11th Season", "team_abbr": "NYY",
+                    "stats": {"AVG": ".322", "HR": "58", "RBI": "144"}},
+        "b_freeman": {"display_name": "Freddie Freeman", "jersey": "5", "position": "1B",
+                      "bat": "L", "throw": "R", "headshot_url": None,
+                      "age": 36, "birthplace": "Villa Park, CA",
+                      "height": "6' 5\"", "weight": "220 lbs",
+                      "experience": "17th Season", "team_abbr": "LAD",
+                      "stats": {"AVG": ".282", "HR": "22", "RBI": "89"}},
+        "b_betts": {"display_name": "Mookie Betts", "jersey": "50", "position": "SS",
+                    "bat": "R", "throw": "R", "headshot_url": None,
+                    "age": 33, "birthplace": "Nashville, TN",
+                    "height": "5' 9\"", "weight": "180 lbs",
+                    "experience": "13th Season", "team_abbr": "LAD",
+                    "stats": {"AVG": ".289", "HR": "19", "RBI": "75"}},
+        "p_cole": {"display_name": "Gerrit Cole", "jersey": "45", "position": "SP",
+                   "bat": "R", "throw": "R", "headshot_url": None,
+                   "age": 35, "birthplace": "Newport Beach, CA",
+                   "height": "6' 4\"", "weight": "220 lbs",
+                   "experience": "13th Season", "team_abbr": "NYY",
+                   "stats": {"ERA": "3.41", "W": "8", "L": "5", "SO": "165"}},
+        "p_yama": {"display_name": "Yoshinobu Yamamoto", "jersey": "18", "position": "SP",
+                   "bat": "R", "throw": "R", "headshot_url": None,
+                   "age": 28, "birthplace": "Okayama, Japan",
+                   "height": "5' 10\"", "weight": "176 lbs",
+                   "experience": "3rd Season", "team_abbr": "LAD",
+                   "stats": {"ERA": "2.90", "W": "11", "L": "4", "SO": "180"}},
+    }
+
+    # After this many innings, reset the simulated game back to a fresh
+    # start rather than climbing forever -- most real games are 9 innings;
+    # this lets the occasional extra-inning case show without the fixture
+    # running away to absurd inning numbers the longer the service is up.
+    _TEST_MODE_MAX_INNING = 10
+
+    def _test_mode_reset_game(self) -> None:
+        game = self.current_game
+        game["inning"] = 1
+        game["inning_half"] = "top"
+        game["balls"] = 0
+        game["strikes"] = 0
+        game["outs"] = 0
+        game["bases_occupied"] = [False, False, False]
+        game["home_score"] = "0"
+        game["away_score"] = "0"
+        game["home_linescore"] = []
+        game["away_linescore"] = []
+        game["home_hits"] = "0"
+        game["away_hits"] = "0"
+        game["home_errors"] = "0"
+        game["away_errors"] = "0"
+
+    def _test_mode_update(self):
+        if self.current_game and self.current_game["is_live"]:
+            if self.current_game["inning_half"] == "top":
+                self.current_game["inning_half"] = "bottom"
+            else:
+                if self.current_game["inning"] >= self._TEST_MODE_MAX_INNING:
+                    self._test_mode_reset_game()
+                    return
+                self.current_game["inning_half"] = "top"
+                self.current_game["inning"] += 1
+                # The inning that just fully completed (bottom just ended)
+                # gets a new line-score entry for both teams.
+                self.current_game.setdefault("away_linescore", []).append(
+                    str(self.current_game["inning"] % 3)
+                )
+                self.current_game.setdefault("home_linescore", []).append(
+                    str((self.current_game["inning"] + 1) % 3)
+                )
+                self.current_game["away_hits"] = str(int(self.current_game.get("away_hits", 0)) + 1)
+                self.current_game["home_hits"] = str(int(self.current_game.get("home_hits", 0)) + 1)
+            self.current_game["balls"] = (self.current_game["balls"] + 1) % 4
+            self.current_game["strikes"] = (self.current_game["strikes"] + 1) % 3
+            self.current_game["outs"] = (self.current_game["outs"] + 1) % 3
+            self.current_game["bases_occupied"] = [
+                not b for b in self.current_game["bases_occupied"]
+            ]
+            if self.current_game["inning"] % 2 == 0:
+                self.current_game["home_score"] = str(
+                    int(self.current_game["home_score"]) + 1
+                )
+            else:
+                self.current_game["away_score"] = str(
+                    int(self.current_game["away_score"]) + 1
+                )
+
+            if self.show_pitcher_batter or self.show_last_play or self.show_player_card:
+                game_id = self.current_game.get("id", "test")
+                sample_index = self.current_game["inning"] % len(
+                    self._TEST_MODE_AT_BAT_SAMPLES
+                )
+                sample = self._TEST_MODE_AT_BAT_SAMPLES[sample_index]
+                self._play_by_play_cache[game_id] = sample
+                # Seed the bio cache so both player cards render offline.
+                if self._wants_player_bios():
+                    for pid in (sample.get("batter_id"), sample.get("pitcher_id")):
+                        if pid and pid not in self._player_bio_cache:
+                            self._player_bio_cache[pid] = self._TEST_MODE_PLAYER_BIOS.get(pid)
+
+    def _maybe_draw_at_bat_info_screen(self, game: Dict, force_clear: bool = False) -> bool:
+        """Rotate in the dedicated pitcher/batter/last-play screen if it's
+        due. Returns True if it drew (caller should skip the normal
+        scorebug draw for this frame), False otherwise.
+        """
+        if not (self.show_pitcher_batter or self.show_last_play):
+            return False
+
+        pbp = self._play_by_play_cache.get(game.get("id"))
+        if not pbp or not (
+            pbp.get("pitcher") or pbp.get("batter") or pbp.get("last_play_code")
+        ):
+            return False
+
+        at_bat_cfg = self.config.get("customization", {}).get("at_bat_info", {})
+
+        # favorites_only restricts this screen to games involving one of
+        # this league's favorite_teams -- independent of show_all_live,
+        # which controls the *normal* rotation separately (same option as
+        # the traditional scoreboard screen).
+        if at_bat_cfg.get("favorites_only", False) and self.favorite_teams:
+            if (
+                game.get("home_abbr") not in self.favorite_teams
+                and game.get("away_abbr") not in self.favorite_teams
+            ):
+                return False
+
+        # dwell_seconds is per card: with both the batter and the pitcher
+        # showing, the screen stays up for twice as long, so neither card is
+        # cut to a two-second flash.
+        dwell = at_bat_cfg.get("dwell_seconds", 4)
+        interval = at_bat_cfg.get("interval_seconds", 30)
+        use_card = self.show_pitcher_batter and self._at_bat_card_style() == "card"
+
+        now = time.time()
+        showing = now < self._at_bat_screen_showing_until
+        if not showing and now - self._at_bat_screen_last_shown >= interval:
+            cards = len(self._at_bat_card_candidates(pbp, at_bat_cfg)) if use_card else 0
+            self._at_bat_screen_last_shown = now
+            self._at_bat_screen_showing_until = now + dwell * max(1, cards)
+            showing = True
+
+        if not showing:
+            return False
+
+        # Card style is the default, but it needs a resolved bio to say
+        # anything the text layout doesn't. Until one lands -- ABL, a fresh
+        # at-bat, an athlete ESPN has no record for -- fall through to the
+        # plain text layout rather than show a card with three empty rows.
+        if use_card:
+            subject = self._pick_at_bat_card_subject(pbp, at_bat_cfg, now, dwell)
+            if subject is not None:
+                role, info, bio = subject
+                self._draw_at_bat_card_screen(game, role, info, bio, pbp, force_clear)
+                return True
+
+        self._draw_at_bat_info_screen(game, pbp, force_clear)
+        return True
+
+    def _pick_at_bat_card_subject(
+        self, pbp: Dict, cfg: Dict, now: float, dwell: float
+    ) -> Optional[Tuple[str, Optional[Dict], Dict]]:
+        """Pick whose card this frame shows, as (role, roster_info, bio).
+
+        With both players available each gets its own ``dwell`` seconds --
+        batter first, then pitcher -- so a single rotation shows both cards
+        instead of making the pitcher wait for the screen to come round
+        again. Returns None when no bio has resolved yet, which sends the
+        caller back to the text layout."""
+        candidates = self._at_bat_card_candidates(pbp, cfg)
+        if not candidates:
+            return None
+
+        elapsed = max(0.0, now - self._at_bat_screen_last_shown)
+        index = int(elapsed / dwell) if dwell > 0 else 0
+        return candidates[min(index, len(candidates) - 1)]
+
+    def _at_bat_card_candidates(
+        self, pbp: Dict, cfg: Dict
+    ) -> List[Tuple[str, Optional[Dict], Dict]]:
+        """The (role, roster_info, bio) cards the at-bat screen can show
+        right now: batter then pitcher, each only when enabled and its bio
+        has resolved."""
+        candidates: List[Tuple[str, Optional[Dict], Dict]] = []
+        for role, enabled, id_key, info_key in (
+            ("batter", cfg.get("show_batter", True), "batter_id", "batter_info"),
+            ("pitcher", cfg.get("show_pitcher", True), "pitcher_id", "pitcher_info"),
+        ):
+            if not enabled:
+                continue
+            player_id = pbp.get(id_key)
+            bio = self._player_bio_cache.get(player_id) if player_id else None
+            if bio:
+                candidates.append((role, pbp.get(info_key), bio))
+        return candidates
+
+    @staticmethod
+    def _truncate_to_width(draw, text: str, font, max_width: int) -> str:
+        """Hard-truncate text (no ellipsis -- pixel fonts render one poorly
+        at small sizes) so it never draws past the panel edge. A long
+        player name is more useful clipped than overlapping the next
+        line's outline or bleeding off-canvas."""
+        if draw.textbbox((0, 0), text, font=font)[2] <= max_width:
+            return text
+        truncated = text
+        while len(truncated) > 1:
+            truncated = truncated[:-1]
+            if draw.textbbox((0, 0), truncated, font=font)[2] <= max_width:
+                return truncated
+        return truncated
+
+    def _draw_at_bat_info_screen(
+        self, game: Dict, pbp: Dict, force_clear: bool = False
+    ) -> None:
+        """Draw the dedicated pitcher/batter/last-play screen.
+
+        This replaces the normal scorebug while it's showing rather than
+        overlaying on top of it -- there isn't enough room on the scorebug,
+        especially at small display sizes, to add this text without
+        crowding or clipping the existing elements.
+        """
+        try:
+            img = Image.new("RGB", (self.display_width, self.display_height), (0, 0, 0))
+            draw = ImageDraw.Draw(img)
+
+            at_bat_cfg = self.config.get("customization", {}).get("at_bat_info", {})
+            pitcher_color = tuple(at_bat_cfg.get("pitcher_color", [255, 255, 255]))
+            batter_color = tuple(at_bat_cfg.get("batter_color", [255, 255, 0]))
+            last_play_color = tuple(at_bat_cfg.get("last_play_color", [0, 255, 255]))
+
+            # Color the pitcher/batter names by their real team colors when
+            # available -- the fielding team is pitching, the team at bat
+            # is batting -- falling back to the flat pitcher_color/
+            # batter_color above when this is off or a color's missing.
+            use_team_colors = at_bat_cfg.get("use_team_colors", True)
+            if use_team_colors:
+                batting_away = (game.get("inning_half") or "top").lower() == "top"
+                batting_color = game.get("away_team_color") if batting_away else game.get("home_team_color")
+                fielding_color = game.get("home_team_color") if batting_away else game.get("away_team_color")
+                if fielding_color:
+                    pitcher_color = fielding_color
+                if batting_color:
+                    batter_color = batting_color
+
+            lines = []
+            if self.show_pitcher_batter and pbp.get("pitcher"):
+                lines.append((f"Pitcher: {pbp['pitcher']}", pitcher_color))
+            if self.show_pitcher_batter and pbp.get("batter"):
+                lines.append((f"Batter: {pbp['batter']}", batter_color))
+            if self.show_last_play and pbp.get("last_play_code"):
+                lines.append((pbp["last_play_code"], last_play_color))
+
+            if not lines:
+                return
+
+            # font_size acts as an optional cap, not a fixed size -- this
+            # auto-fits the largest text that still fits every line's
+            # actual width (not just a generic character) within the
+            # display, the same "cap, not fixed size" convention the
+            # traditional scoreboard uses. Lower font_size to force a
+            # smaller, more consistent size instead.
+            margin = 1
+            available_height = self.display_height - 2 * margin
+            available_width = self.display_width - 2 * margin
+            font_cfg = dict(at_bat_cfg)
+            # Match config_schema.json's default explicitly -- see the same
+            # pattern (and reasoning) in _draw_traditional_scoreboard_screen.
+            font_cfg.setdefault("font", "9x15.bdf")
+            font_size_cap = font_cfg.get("font_size", 24)
+            max_row_h = available_height / len(lines)
+            font_cfg["font_size"] = max(6, min(font_size_cap, round(max_row_h - 3)))
+            line_texts = [text for text, _ in lines]
+            font, row_h = self._load_multiline_fit_font(font_cfg, line_texts, available_width, available_height)
+
+            total_height = row_h * len(lines)
+            y = max(margin, (self.display_height - total_height) // 2)
+
+            for text, color in lines:
+                if y >= self.display_height:
+                    break
+                text = self._truncate_to_width(draw, text, font, available_width)
+                text_w = draw.textbbox((0, 0), text, font=font)[2]
+                x = max(margin, (self.display_width - text_w) // 2)
+                self._draw_text_with_outline(draw, text, (x, y), font, fill=color)
+                y += row_h
+
+            self.display_manager.image.paste(img, (0, 0))
+            self.display_manager.update_display()
+
+        except Exception as e:
+            self.logger.error(f"Error drawing at-bat info screen: {e}", exc_info=True)
+
+    # Top-to-bottom order the at-bat card's rows are drawn in.
+    _AT_BAT_CARD_ROW_ORDER: Tuple[str, ...] = (
+        "header", "name", "team", "stats", "vitals", "hometown", "extra",
+    )
+    # The order rows are given up in when the panel can't fit them all,
+    # least useful first. Deliberately not the reverse of the draw order:
+    # the season line reads several rows down but is worth more than the
+    # team/number row it sits under, so a 128x32 keeps the banner, the name
+    # and a stat or two while the biographical trivia only appears on a
+    # panel with the height to spare.
+    _AT_BAT_CARD_DROP_ORDER: Tuple[str, ...] = (
+        "extra", "hometown", "vitals", "team", "stats", "name",
+    )
+
+    @staticmethod
+    def _readable_on(background: Tuple[int, int, int]) -> Tuple[int, int, int]:
+        """Black or white, whichever reads against `background`. Team colors
+        run from near-black navy to bright yellow, so a banner knocked out in
+        a fixed color is illegible for roughly half the league."""
+        r, g, b = background[:3]
+        # Rec. 601 luma -- close enough for a two-way choice, and cheap.
+        return (0, 0, 0) if (0.299 * r + 0.587 * g + 0.114 * b) > 140 else (255, 255, 255)
+
+    # Separator between the segments of each row. A row is built as a list of
+    # whole segments so a narrow panel can give up trailing ones intact --
+    # see _fit_segments.
+    _AT_BAT_CARD_ROW_SEPARATOR: Dict[str, str] = {"team": " "}
+
+    @classmethod
+    def _at_bat_card_row_text(cls, key: str, segments: List[str]) -> str:
+        """Render one row's segments as the string it is drawn as."""
+        return cls._AT_BAT_CARD_ROW_SEPARATOR.get(key, "  ").join(segments)
+
+    @staticmethod
+    def _build_at_bat_card_rows(
+        role: str, info: Optional[Dict], bio: Dict,
+        last_play_code: Optional[str] = None,
+    ) -> Dict[str, List[str]]:
+        """Assemble the card's rows as {row_key: [segment, ...]}.
+
+        Every field ESPN might not have sent is simply absent from the
+        result rather than rendering as an empty or half-built line, so a
+        sparse NCAA athlete record degrades to a banner, a name and
+        whatever stats exist."""
+        info = info or {}
+        rows: Dict[str, List[str]] = {}
+
+        header = ["NOW BATTING" if role == "batter" else "NOW PITCHING"]
+        if last_play_code:
+            header.append(str(last_play_code))
+        rows["header"] = header
+        rows["name"] = [bio.get("display_name") or info.get("name") or "Player"]
+
+        jersey = bio.get("jersey") or info.get("jersey")
+        position = bio.get("position") or info.get("position") or ""
+        team = bio.get("team_abbr") or info.get("team_abbr") or ""
+        team_line = [
+            part for part in (team, f"#{jersey}" if jersey else "", position) if part
+        ]
+        if team_line:
+            rows["team"] = team_line
+
+        age = bio.get("age")
+        bat = bio.get("bat") or info.get("bat")
+        throw = bio.get("throw") or info.get("throw")
+        vitals = []
+        if age:
+            vitals.append(f"Age {age}")
+        if bat and throw:
+            vitals.append(f"B/T {bat}/{throw}")
+        elif bat:
+            vitals.append(f"Bats {bat}")
+        elif throw:
+            vitals.append(f"Throws {throw}")
+        if vitals:
+            rows["vitals"] = vitals
+
+        hometown = bio.get("birthplace")
+        if hometown:
+            rows["hometown"] = [str(hometown)]
+
+        extra = [
+            str(part) for part in
+            (bio.get("height"), bio.get("weight"), bio.get("experience"))
+            if part
+        ]
+        if extra:
+            rows["extra"] = extra
+
+        return rows
+
+    @staticmethod
+    def _fit_segments(draw, segments: List[str], font, fit_width: int,
+                      separator: str = "  ") -> str:
+        """Join `segments` into one line that fits fit_width.
+
+        Drops whole trailing segments rather than letting a hard truncation
+        cut through the middle of one: "AVG .312  H" silently loses the
+        HR/RBI values with no sign anything is missing, and "Age 34  B/T"
+        reads as a field the feed didn't fill in. Callers still truncate the
+        result as a last resort, for when even a single segment overflows."""
+        if not segments:
+            return ""
+        trimmed = list(segments)
+        while len(trimmed) > 1:
+            candidate = separator.join(trimmed)
+            if draw.textbbox((0, 0), candidate, font=font)[2] <= fit_width:
+                break
+            trimmed = trimmed[:-1]
+        return separator.join(trimmed)
+
+    def _at_bat_card_team_color(self, game: Dict, role: str, info: Optional[Dict]):
+        """Team color for the at-bat card. Prefers the athlete's own roster
+        team (authoritative), then infers from the half-inning -- the
+        fielding team is pitching, the team at bat is hitting -- which is
+        what the text layout has always done."""
+        color = self._player_card_team_color(game, info)
+        if color:
+            return color
+        batting_away = (game.get("inning_half") or "top").lower() == "top"
+        if role == "batter":
+            return game.get("away_team_color") if batting_away else game.get("home_team_color")
+        return game.get("home_team_color") if batting_away else game.get("away_team_color")
+
+    def _draw_at_bat_card_screen(
+        self, game: Dict, role: str, info: Optional[Dict], bio: Dict,
+        pbp: Dict, force_clear: bool = False,
+    ) -> None:
+        """Draw the pitcher/batter screen as a baseball card: headshot on the
+        left, then a "NOW BATTING"/"NOW PITCHING" banner, the player's name,
+        season stats, team/number/position, age and bat/throw, hometown, and
+        height/weight/experience.
+
+        Nothing here is tiered by a hardcoded panel-size table. The font
+        ladder is asked to fit every row; if it cannot, the next row in
+        _AT_BAT_CARD_DROP_ORDER is given up and the ladder is asked again,
+        until what is left fits. That keeps a 128x32 and a 512x64 showing the
+        same card with the detail each has room for, instead of two layouts
+        that drift apart."""
+        try:
+            w, h = self.display_width, self.display_height
+            img = Image.new("RGB", (w, h), (0, 0, 0))
+            draw = ImageDraw.Draw(img)
+
+            info = info or {}
+            cfg = self.config.get("customization", {}).get("at_bat_info", {})
+            text_color = tuple(cfg.get("text_color", [255, 255, 255]))
+            stat_color = tuple(cfg.get("stat_color", [0, 220, 255]))
+            detail_color = tuple(cfg.get("detail_color", [170, 170, 170]))
+            flat_role_color = tuple(
+                cfg.get("batter_color", [255, 255, 0]) if role == "batter"
+                else cfg.get("pitcher_color", [255, 255, 255])
+            )
+
+            team_color = self._at_bat_card_team_color(game, role, info)
+            use_team_colors = cfg.get("use_team_colors", True)
+            accent = team_color if (use_team_colors and team_color) else flat_role_color
+
+            last_play_code = pbp.get("last_play_code") if self.show_last_play else None
+            rows = self._build_at_bat_card_rows(role, info, bio, last_play_code)
+            if cfg.get("show_stats", True):
+                stats = self._format_card_stats(bio)
+                if stats:
+                    rows["stats"] = [f"{label} {value}" for label, value in stats]
+            if not cfg.get("show_bio_details", True):
+                for key in ("vitals", "hometown", "extra"):
+                    rows.pop(key, None)
+
+            colors = {
+                "header": accent,
+                # The name stays white: team colors are brightness-clamped
+                # into a legible band but a dark navy or maroon still reads
+                # poorly at the size a name is drawn, and the banner right
+                # above it already carries the team's color.
+                "name": text_color,
+                "team": accent,
+                "stats": stat_color,
+                "vitals": detail_color,
+                "hometown": detail_color,
+                "extra": detail_color,
+            }
+
+            margin = 1
+            headshot = None
+            if cfg.get("show_headshot", True) and w >= 96 and h >= 32:
+                # Height-constrained so it never overflows a 32px panel, and
+                # capped at a third of the width so the text column keeps the
+                # room it needs for a full name.
+                headshot_size = min(
+                    max(24, h - 2 * (margin + 2)), h - 2 * (margin + 1), w // 3
+                )
+                mgr = self._get_headshot_manager()
+                if mgr is not None and self.espn_summary_sport_league:
+                    _, league = self.espn_summary_sport_league
+                    # Cache-only on the render path: update() prefetches the
+                    # bytes off-thread, so a miss renders text-only rather
+                    # than blocking the display on a network fetch.
+                    headshot = mgr.load_headshot(
+                        str(bio.get("player_id") or info.get("player_id") or "")
+                        or str(info.get("id") or ""),
+                        bio.get("headshot_url") or info.get("headshot_url"),
+                        league=league,
+                        max_size=headshot_size,
+                        allow_download=False,
+                    )
+
+            if headshot is not None:
+                hx, hy = margin + 1, (h - headshot.height) // 2
+                draw.rectangle(
+                    [hx - 1, hy - 1, hx + headshot.width, hy + headshot.height],
+                    outline=accent,
+                )
+                img.paste(headshot, (hx, hy), headshot)
+                text_x = hx + headshot.width + 4
+            else:
+                text_x = margin + 1
+
+            # Reserve the margin plus 1px for the text outline, which
+            # _draw_text_with_outline paints 1px beyond the glyph on every
+            # side, so nothing bleeds into the edge columns.
+            avail_w = max(8, w - text_x - margin - 2)
+            avail_h = h - 2 * margin
+
+            font_cfg = dict(cfg)
+            # Match config_schema.json's default explicitly -- same pattern
+            # (and reasoning) as _draw_traditional_scoreboard_screen.
+            font_cfg.setdefault("font", "9x15.bdf")
+            font_size_cap = font_cfg.get("font_size", 24)
+
+            keys = [k for k in self._AT_BAT_CARD_ROW_ORDER if rows.get(k)]
+            texts = {k: self._at_bat_card_row_text(k, rows[k]) for k in keys}
+            droppable = [k for k in self._AT_BAT_CARD_DROP_ORDER if k in keys]
+            font, row_h = None, 0
+            while keys:
+                font_cfg["font_size"] = max(
+                    6, min(font_size_cap, round(avail_h / len(keys) - 3))
+                )
+                font, row_h = self._load_multiline_fit_font(
+                    font_cfg, [texts[k] for k in keys], avail_w, avail_h
+                )
+                if row_h * len(keys) <= avail_h or not droppable:
+                    break
+                keys.remove(droppable.pop(0))
+            if font is None:
+                return
+
+            header_bar = (
+                cfg.get("header_bar", True)
+                and "header" in keys
+                and h >= 48
+                and row_h >= 8
+            )
+
+            total_height = row_h * len(keys)
+            y = max(margin, (h - total_height) // 2)
+            for key in keys:
+                if y >= h:
+                    break
+                text = self._fit_segments(
+                    draw, rows[key], font, avail_w,
+                    self._AT_BAT_CARD_ROW_SEPARATOR.get(key, "  "),
+                )
+                text = self._truncate_to_width(draw, text, font, avail_w)
+                if key == "header" and header_bar:
+                    # Knocked-out banner: the team color behind, glyphs in
+                    # whichever of black/white reads against it. Drawn flat
+                    # rather than through _draw_text_with_outline, whose
+                    # black outline would smear a knocked-out glyph.
+                    draw.rectangle(
+                        [text_x - 1, y, text_x + avail_w, min(h - 1, y + row_h - 2)],
+                        fill=accent,
+                    )
+                    draw.fontmode = "1"
+                    draw.text(
+                        (text_x + 1, y), text, font=font,
+                        fill=self._readable_on(accent),
+                    )
+                else:
+                    self._draw_text_with_outline(
+                        draw, text, (text_x, y), font, fill=colors[key]
+                    )
+                y += row_h
+
+            self.display_manager.image.paste(img, (0, 0))
+            self.display_manager.update_display()
+
+        except Exception as e:
+            self.logger.error(f"Error drawing at-bat player card: {e}", exc_info=True)
+
+    def _get_headshot_manager(self):
+        """Lazily create the headshot loader (a BaseballLogoManager, which
+        already has the disk/memory-cache + download machinery). Returns None
+        if it can't be constructed so the card degrades to text-only."""
+        if self._headshot_mgr is None:
+            try:
+                from abl_logo_manager import BaseballLogoManager
+                self._headshot_mgr = BaseballLogoManager(
+                    self.display_manager, self.logger, self.sport_key
+                )
+            except Exception as e:
+                self.logger.debug(f"Could not create headshot manager: {e}")
+                return None
+        return self._headshot_mgr
+
+    def _player_card_team_color(self, game: Dict, info: Optional[Dict]):
+        """Pick the team color for a card's border/name from the athlete's
+        roster team_id (authoritative), cross-checked against the game's
+        home/away ids; fall back to inning-half inference, then None."""
+        if info:
+            team_id = str(info.get("team_id") or "")
+            if team_id and team_id == str(game.get("home_id") or ""):
+                return game.get("home_team_color")
+            if team_id and team_id == str(game.get("away_id") or ""):
+                return game.get("away_team_color")
+        return None
+
+    def _maybe_draw_player_card_screen(self, game: Dict, force_clear: bool = False) -> bool:
+        """Rotate in the masters-style player card (headshot + bio + season
+        stats) for the current batter/pitcher if it's due. Returns True if it
+        drew. Skips silently for ABL (no ESPN athlete ids) and whenever a
+        resolved bio isn't available yet, so a blank card is never shown."""
+        if not self.show_player_card:
+            return False
+        if not self.espn_summary_sport_league:
+            return False  # ABL: no ESPN athlete ids
+
+        pbp = self._play_by_play_cache.get(game.get("id"))
+        if not pbp:
+            return False
+
+        card_cfg = self.config.get("customization", {}).get("player_card", {})
+        show_batter = card_cfg.get("show_batter", True)
+        show_pitcher = card_cfg.get("show_pitcher", False)
+
+        # Resolve which player to show (batter takes priority) -- requires both
+        # roster info and a fetched bio, else there's nothing worth a card.
+        candidate = None
+        if show_batter and pbp.get("batter_id"):
+            bio = self._player_bio_cache.get(pbp["batter_id"])
+            if bio:
+                candidate = ("batter", pbp.get("batter_info"), bio)
+        if candidate is None and show_pitcher and pbp.get("pitcher_id"):
+            bio = self._player_bio_cache.get(pbp["pitcher_id"])
+            if bio:
+                candidate = ("pitcher", pbp.get("pitcher_info"), bio)
+        if candidate is None:
+            return False
+
+        if card_cfg.get("favorites_only", False) and self.favorite_teams:
+            if (
+                game.get("home_abbr") not in self.favorite_teams
+                and game.get("away_abbr") not in self.favorite_teams
+            ):
+                return False
+
+        dwell = card_cfg.get("dwell_seconds", 6)
+        interval = card_cfg.get("interval_seconds", 40)
+
+        now = time.time()
+        showing = now < self._player_card_showing_until
+        if not showing and now - self._player_card_last_shown >= interval:
+            self._player_card_last_shown = now
+            self._player_card_showing_until = now + dwell
+            showing = True
+
+        if not showing:
+            return False
+
+        role, info, bio = candidate
+        self._draw_player_card_screen(game, role, info, bio, force_clear)
+        return True
+
+    @staticmethod
+    def _format_card_stats(bio: Dict) -> List[Tuple[str, str]]:
+        """Pick a compact, position-appropriate set of (label, value) stat
+        pairs for a bio.
+
+        ESPN's `statsSummary` already picks and orders the right stats for the
+        player's position (AVG/HR/RBI/OPS for a hitter, ERA/K/WHIP/SV for a
+        pitcher), so when the parser captured it as `stat_pairs` that wins.
+        The hand-rolled selection below stays as the fallback for feeds
+        without one: hitter stats (AVG/HR/RBI), then pitcher stats
+        (ERA/W-L/K), then whatever labels ESPN gave, so NCAA feeds with
+        sparse/odd labels still show *something*."""
+        stat_pairs = bio.get("stat_pairs") or []
+        if stat_pairs:
+            return [(str(label), str(value)) for label, value in stat_pairs[:4]]
+
+        stats = bio.get("stats") or {}
+        if not stats:
+            return []
+
+        def pick(*names):
+            for n in names:
+                for k, v in stats.items():
+                    if k.upper() == n.upper():
+                        return v
+            return None
+
+        pos = (bio.get("position") or "").upper()
+        is_pitcher = pos in ("P", "SP", "RP", "CP")
+
+        avg, hr, rbi = pick("AVG", "BA"), pick("HR", "homeRuns"), pick("RBI", "RBIs")
+        era, so = pick("ERA"), pick("SO", "K", "strikeouts")
+        wins, losses = pick("W", "wins"), pick("L", "losses")
+
+        pairs: List[Tuple[str, str]] = []
+        if is_pitcher and (era is not None or wins is not None):
+            if era is not None:
+                pairs.append(("ERA", str(era)))
+            if wins is not None and losses is not None:
+                pairs.append(("W-L", f"{wins}-{losses}"))
+            if so is not None:
+                pairs.append(("K", str(so)))
+        elif avg is not None or hr is not None or rbi is not None:
+            if avg is not None:
+                pairs.append(("AVG", str(avg)))
+            if hr is not None:
+                pairs.append(("HR", str(hr)))
+            if rbi is not None:
+                pairs.append(("RBI", str(rbi)))
+        if not pairs:
+            # Generic fallback: first three labels ESPN provided.
+            for k, v in list(stats.items())[:3]:
+                pairs.append((str(k), str(v)))
+        return pairs
+
+    def _draw_player_card_screen(
+        self, game: Dict, role: str, info: Optional[Dict], bio: Dict,
+        force_clear: bool = False,
+    ) -> None:
+        """Draw a masters-style player card: headshot (when the panel is big
+        enough) + name, jersey/position, bat/throw, and season stats. Layout is
+        tiered by display size; the headshot is hidden on tiny panels and the
+        text degrades gracefully when fields are missing."""
+        try:
+            w, h = self.display_width, self.display_height
+            img = Image.new("RGB", (w, h), (0, 0, 0))
+            draw = ImageDraw.Draw(img)
+
+            card_cfg = self.config.get("customization", {}).get("player_card", {})
+            text_color = tuple(card_cfg.get("text_color", [255, 255, 255]))
+            stat_color = tuple(card_cfg.get("stat_color", [0, 220, 255]))
+            border_color = tuple(card_cfg.get("border_color", [255, 200, 0]))
+            use_team_colors = card_cfg.get("use_team_colors", True)
+            use_border_color = card_cfg.get("use_team_colors_border", True)
+
+            info = info or {}
+            name = bio.get("display_name") or info.get("name") or "Player"
+            jersey = bio.get("jersey") or info.get("jersey")
+            position = bio.get("position") or info.get("position") or ""
+            bat = bio.get("bat") or info.get("bat")
+            throw = bio.get("throw") or info.get("throw")
+            stats = self._format_card_stats(bio)
+
+            team_color = self._player_card_team_color(game, info)
+            name_color = team_color if (use_team_colors and team_color) else text_color
+            frame_color = team_color if (use_border_color and team_color) else border_color
+
+            # Text lines built compactly; label/value stat pairs are rendered
+            # as "AVG .312  HR 12  RBI 40" style joined strings.
+            jersey_pos = " ".join(
+                p for p in (f"#{jersey}" if jersey else "", position) if p
+            )
+            bt = " ".join(
+                p for p in ((f"B:{bat}" if bat else ""), (f"T:{throw}" if throw else "")) if p
+            )
+            stat_str = "  ".join(f"{lbl} {val}" for lbl, val in stats)
+
+            margin = 1
+            # Tier by size: hide the headshot on short/narrow panels.
+            show_headshot = w >= 96 and h >= 32
+            headshot = None
+            headshot_size = 0
+            if show_headshot:
+                # Height-constrained so it never overflows a 32px panel.
+                headshot_size = min(
+                    max(24, h - 2 * (margin + 2)), h - 2 * (margin + 1), w // 3
+                )
+                mgr = self._get_headshot_manager()
+                if mgr is not None:
+                    _, league = self.espn_summary_sport_league
+                    # Cache-only on the render path (allow_download=False) so a
+                    # cache miss never blocks the display on a network fetch --
+                    # update() prefetches the bytes off-thread. A miss simply
+                    # renders text-only until the prefetch warms the cache.
+                    headshot = mgr.load_headshot(
+                        str(bio.get("player_id") or info.get("player_id") or "")
+                        or str(info.get("id") or ""),
+                        bio.get("headshot_url") or info.get("headshot_url"),
+                        league=league,
+                        max_size=headshot_size,
+                        allow_download=False,
+                    )
+
+            if headshot is not None:
+                hx, hy = margin + 1, (h - headshot.height) // 2
+                # Team-color / gold frame around the headshot.
+                draw.rectangle(
+                    [hx - 1, hy - 1, hx + headshot.width, hy + headshot.height],
+                    outline=frame_color,
+                )
+                img.paste(headshot, (hx, hy), headshot)
+                text_x = hx + headshot.width + 4
+            else:
+                headshot_size = 0
+                text_x = margin + 1
+
+            # Reserve the margin plus 1px for the text outline (which
+            # _draw_text_with_outline paints 1px beyond the glyph on every
+            # side) so nothing bleeds into the edge columns.
+            avail_w = w - text_x - margin - 2
+            # Assemble the text lines for this tier.
+            if not show_headshot and h <= 32:
+                # Tiny tier: 2 compact centered lines.
+                lines = [(name if len(name) <= 12 else (info.get("name") or name), name_color)]
+                bottom = stat_str or jersey_pos
+                if bottom:
+                    lines.append((bottom, stat_color if stat_str else text_color))
+            else:
+                lines = [(name, name_color)]
+                meta = "  ".join(p for p in (jersey_pos, bt) if p)
+                if meta:
+                    lines.append((meta, text_color))
+                if stat_str:
+                    lines.append((stat_str, stat_color))
+
+            if not lines:
+                return
+
+            font_cfg = dict(card_cfg)
+            font_cfg.setdefault("font", "9x15.bdf")
+            available_height = h - 2 * margin
+            font_size_cap = font_cfg.get("font_size", 24)
+            max_row_h = available_height / max(1, len(lines))
+            font_cfg["font_size"] = max(6, min(font_size_cap, round(max_row_h - 3)))
+            line_texts = [t for t, _ in lines]
+            font, row_h = self._load_multiline_fit_font(
+                font_cfg, line_texts, max(8, avail_w), available_height
+            )
+
+            # The stat line ("AVG .312  HR 28  RBI 71") is the longest line
+            # and the one most likely to overflow avail_w on narrow panels,
+            # since its font size was fit alongside the shorter name/jersey
+            # lines. _fit_stat_pairs drops whole trailing pairs rather than
+            # letting the _truncate_to_width call below hard-cut it mid-pair.
+            if stat_str and stats:
+                trimmed_stat_str = self._fit_segments(
+                    draw, [f"{lbl} {val}" for lbl, val in stats], font, max(8, avail_w)
+                )
+                if trimmed_stat_str != stat_str:
+                    for idx, (line_text, line_color) in enumerate(lines):
+                        if line_text == stat_str:
+                            lines[idx] = (trimmed_stat_str, line_color)
+                            break
+
+            total_height = row_h * len(lines)
+            y = max(margin, (h - total_height) // 2)
+            for text, color in lines:
+                if y >= h:
+                    break
+                text = self._truncate_to_width(draw, text, font, avail_w)
+                if not show_headshot:
+                    # Center text-only tiers horizontally, keeping >=1px for
+                    # the outline on the left edge.
+                    tw = draw.textbbox((0, 0), text, font=font)[2]
+                    tx = max(margin + 1, (w - tw) // 2)
+                else:
+                    tx = text_x
+                self._draw_text_with_outline(draw, text, (tx, y), font, fill=color)
+                y += row_h
+
+            self.display_manager.image.paste(img, (0, 0))
+            self.display_manager.update_display()
+
+        except Exception as e:
+            self.logger.error(f"Error drawing player card screen: {e}", exc_info=True)
+
+    def _draw_scorebug_layout(self, game: Dict, force_clear: bool = False) -> None:
+        """Draw the detailed scorebug layout for a live baseball game."""
+        # Who just scored comes first: it is the second beat of a run.
+        if self._maybe_draw_scorer_card(game, force_clear):
+            return
+        if self._maybe_draw_at_bat_info_screen(game, force_clear):
+            return
+        if self._maybe_draw_player_card_screen(game, force_clear):
+            return
+        if self._maybe_draw_traditional_scoreboard_screen(game, force_clear):
+            return
+        try:
+            main_img = Image.new(
+                "RGBA", (self.display_width, self.display_height), (0, 0, 0, 255)
+            )
+            overlay = Image.new(
+                "RGBA", (self.display_width, self.display_height), (0, 0, 0, 0)
+            )
+            draw_overlay = ImageDraw.Draw(
+                overlay
+            )  # Draw text elements on overlay first
+
+            home_logo = self._load_and_resize_logo(
+                game["home_id"],
+                game["home_abbr"],
+                game["home_logo_path"],
+                game.get("home_logo_url"),
+            )
+            away_logo = self._load_and_resize_logo(
+                game["away_id"],
+                game["away_abbr"],
+                game["away_logo_path"],
+                game.get("away_logo_url"),
+            )
+
+            if not home_logo or not away_logo:
+                self.logger.error(
+                    f"Failed to load logos for live game: {game.get('id')}"
+                )
+                # Draw placeholder text if logos fail
+                error_img = main_img.convert("RGB")
+                draw_final = ImageDraw.Draw(error_img)
+                self._draw_text_with_outline(
+                    draw_final, "Logo Error", (5, 5), self.fonts["status"]
+                )
+                self.display_manager.image.paste(error_img, (0, 0))
+                self.display_manager.update_display()
+                return
+
+            center_y = self.display_height // 2
+
+            # Draw logos with slight edge bleed (plus any configured layout offsets)
+            home_x = (
+                self.display_width - home_logo.width + 2
+                + self._get_layout_offset('home_logo', 'x_offset')
+            )
+            home_y = (
+                center_y - (home_logo.height // 2)
+                + self._get_layout_offset('home_logo', 'y_offset')
+            )
+            main_img.paste(home_logo, (home_x, home_y), home_logo)
+
+            away_x = -2 + self._get_layout_offset('away_logo', 'x_offset')
+            away_y = (
+                center_y - (away_logo.height // 2)
+                + self._get_layout_offset('away_logo', 'y_offset')
+            )
+            main_img.paste(away_logo, (away_x, away_y), away_logo)
+
+            # --- Live Game Specific Elements ---
+
+            # Define default text color
+
+            # Draw Inning (Top Center)
+            if game["is_final"]:
+                inning_text = "FINAL"
+            else:
+                inning_half_indicator = (
+                    "▲" if game["inning_half"].lower() == "top" else "▼"
+                )
+                inning_text = f"{inning_half_indicator}{game['inning']}"
+
+            inning_bbox = draw_overlay.textbbox(
+                (0, 0), inning_text, font=self.display_manager.font
+            )
+            inning_width = inning_bbox[2] - inning_bbox[0]
+            inning_x = (self.display_width - inning_width) // 2
+            inning_y = 1  # Position near top center
+            # display_options.show_innings hides the ▲/▼ inning; "FINAL" is
+            # the game's status, not the inning, and stays. The bbox above is
+            # still measured so the bases sit where they always have.
+            if game["is_final"] or getattr(self, "show_innings", True):
+                self._draw_text_with_outline(
+                    draw_overlay,
+                    inning_text,
+                    (inning_x, inning_y),
+                    self.display_manager.font,
+                )
+
+            # --- REVISED BASES AND OUTS DRAWING ---
+            bases_occupied = game["bases_occupied"]  # [1st, 2nd, 3rd]
+            outs = game.get("outs", 0)
+            inning_half = game["inning_half"]
+            # display_options toggles. getattr: tests and the harness build
+            # managers without __init__. Hidden elements keep their geometry,
+            # so turning one off never shifts the others around the panel.
+            show_bases = getattr(self, "show_bases", True)
+            show_outs = getattr(self, "show_outs", True)
+            show_count = getattr(self, "show_count", True)
+
+            # Read configurable game display settings
+            customization = self.config.get('customization', {})
+            bases_cfg = customization.get('bases', {})
+            outs_cfg = customization.get('outs', {})
+            count_cfg = customization.get('count', {})
+
+            # Define geometry (configurable with defaults matching original)
+            base_diamond_size = bases_cfg.get('diamond_size', 7)
+            out_circle_diameter = outs_cfg.get('circle_diameter', 3)
+            out_vertical_spacing = outs_cfg.get('spacing', 2)
+            spacing_between_bases_outs = outs_cfg.get('distance_from_bases', 3)
+            base_vert_spacing = 1  # Internal vertical space in base cluster
+            base_horiz_spacing = 1  # Internal horizontal space in base cluster
+
+            # Calculate cluster dimensions
+            base_cluster_height = (
+                base_diamond_size + base_vert_spacing + base_diamond_size
+            )
+            base_cluster_width = (
+                base_diamond_size + base_horiz_spacing + base_diamond_size
+            )
+            out_cluster_height = 3 * out_circle_diameter + 2 * out_vertical_spacing
+            out_cluster_width = out_circle_diameter
+
+            # Calculate overall start positions
+            overall_start_y = (
+                inning_bbox[3] + 0
+            )  # Start immediately below inning text
+
+            # Center the BASE cluster horizontally (with optional offset)
+            bases_origin_x = (self.display_width - base_cluster_width) // 2 + bases_cfg.get('x_offset', 0)
+            overall_start_y += bases_cfg.get('y_offset', 0)
+
+            # Determine relative positions for outs based on inning half
+            # Only compute outs column position when count data is available
+            has_count_data = game.get("has_count_data", True)
+            if has_count_data:
+                if inning_half == "top":  # Away batting, outs on left
+                    outs_column_x = (
+                        bases_origin_x - spacing_between_bases_outs - out_cluster_width
+                    )
+                else:  # Home batting, outs on right
+                    outs_column_x = (
+                        bases_origin_x + base_cluster_width + spacing_between_bases_outs
+                    )
+
+                # Calculate vertical alignment offset for outs column (center align with bases cluster)
+                outs_column_start_y = (
+                    overall_start_y + (base_cluster_height // 2) - (out_cluster_height // 2)
+                )
+
+            # --- Draw Bases (Diamonds) ---
+            base_color_occupied = tuple(bases_cfg.get('occupied_color', [255, 255, 255]))
+            base_color_empty = tuple(bases_cfg.get('empty_color', [255, 255, 255]))
+            h_d = base_diamond_size // 2
+
+            # 2nd Base (Top center relative to bases_origin_x)
+            c2x = bases_origin_x + base_cluster_width // 2
+            c2y = overall_start_y + h_d
+            poly2 = [
+                (c2x, overall_start_y),
+                (c2x + h_d, c2y),
+                (c2x, c2y + h_d),
+                (c2x - h_d, c2y),
+            ]
+            if show_bases:
+                if bases_occupied[1]:
+                    draw_overlay.polygon(poly2, fill=base_color_occupied)
+                else:
+                    draw_overlay.polygon(poly2, outline=base_color_empty)
+
+            base_bottom_y = c2y + h_d  # Bottom Y of 2nd base diamond
+
+            # 3rd Base (Bottom left relative to bases_origin_x)
+            c3x = bases_origin_x + h_d
+            c3y = base_bottom_y + base_vert_spacing + h_d
+            poly3 = [
+                (c3x, base_bottom_y + base_vert_spacing),
+                (c3x + h_d, c3y),
+                (c3x, c3y + h_d),
+                (c3x - h_d, c3y),
+            ]
+            if show_bases:
+                if bases_occupied[2]:
+                    draw_overlay.polygon(poly3, fill=base_color_occupied)
+                else:
+                    draw_overlay.polygon(poly3, outline=base_color_empty)
+
+            # 1st Base (Bottom right relative to bases_origin_x)
+            c1x = bases_origin_x + base_cluster_width - h_d
+            c1y = base_bottom_y + base_vert_spacing + h_d
+            poly1 = [
+                (c1x, base_bottom_y + base_vert_spacing),
+                (c1x + h_d, c1y),
+                (c1x, c1y + h_d),
+                (c1x - h_d, c1y),
+            ]
+            if show_bases:
+                if bases_occupied[0]:
+                    draw_overlay.polygon(poly1, fill=base_color_occupied)
+                else:
+                    draw_overlay.polygon(poly1, outline=base_color_empty)
+
+            # --- Draw Outs (Vertical Circles) ---
+            # Only render outs and count when data is available (ESPN NCAA doesn't provide these)
+            if has_count_data and show_outs:
+                circle_color_out = tuple(outs_cfg.get('counted_color', [255, 255, 255]))
+                circle_color_empty_outline = tuple(outs_cfg.get('empty_color', [100, 100, 100]))
+
+                for i in range(3):
+                    cx = outs_column_x
+                    cy = outs_column_start_y + i * (
+                        out_circle_diameter + out_vertical_spacing
+                    )
+                    coords = [cx, cy, cx + out_circle_diameter, cy + out_circle_diameter]
+                    if i < outs:
+                        draw_overlay.ellipse(coords, fill=circle_color_out)
+                    else:
+                        draw_overlay.ellipse(coords, outline=circle_color_empty_outline)
+
+            # --- Draw Balls-Strikes Count (BDF Font) ---
+            if has_count_data and show_count:
+                balls = game.get("balls", 0)
+                strikes = game.get("strikes", 0)
+
+                # Add debug logging for count with cooldown
+                current_time = time.time()
+                if (
+                    game["home_abbr"] in self.favorite_teams
+                    or game["away_abbr"] in self.favorite_teams
+                ) and current_time - self.last_count_log_time >= self.count_log_interval:
+                    self.logger.debug(f"Displaying count: {balls}-{strikes}")
+                    self.logger.debug(
+                        f"Raw count data: balls={game.get('balls')}, strikes={game.get('strikes')}"
+                    )
+                    self.last_count_log_time = current_time
+
+                count_text = f"{balls}-{strikes}"
+                bdf_font = self._count_bdf_font()
+                count_text_width = self.display_manager.get_text_width(count_text, bdf_font)
+
+                # Position below the base/out cluster
+                cluster_bottom_y = (
+                    overall_start_y + base_cluster_height
+                )  # Find the bottom of the taller part (bases)
+                count_y = cluster_bottom_y + count_cfg.get('y_offset', 2)
+
+                # Center horizontally within the BASE cluster width
+                count_x = bases_origin_x + (base_cluster_width - count_text_width) // 2
+
+                # Temporarily set draw object for BDF text rendering, then restore
+                original_draw = self.display_manager.draw
+                self.display_manager.draw = draw_overlay
+                try:
+                    # Draw Balls-Strikes Count with outline using BDF font
+                    outline_color_for_bdf = (0, 0, 0)
+
+                    # Draw outline
+                    for dx_offset, dy_offset in [
+                        (-1, -1),
+                        (-1, 0),
+                        (-1, 1),
+                        (0, -1),
+                        (0, 1),
+                        (1, -1),
+                        (1, 0),
+                        (1, 1),
+                    ]:
+                        self.display_manager._draw_bdf_text(
+                            count_text,
+                            count_x + dx_offset,
+                            count_y + dy_offset,
+                            color=outline_color_for_bdf,
+                            font=bdf_font,
+                        )
+
+                    # Draw main text
+                    count_text_color = tuple(count_cfg.get('text_color', [255, 255, 255]))
+                    self.display_manager._draw_bdf_text(
+                        count_text, count_x, count_y, color=count_text_color, font=bdf_font
+                    )
+                finally:
+                    self.display_manager.draw = original_draw
+
+            # Draw Team:Score at the bottom (matching main branch format).
+            #
+            # The label and the number are drawn in DIFFERENT faces on purpose.
+            # Both used to be display_manager.font -- a fixed 8px PressStart2P
+            # that never moved with the panel -- so on a 48- or 64-tall card
+            # the run count, the one number this screen exists to show, was the
+            # same size as the abbreviation next to it and smaller than the
+            # inning above it. The runs now use the panel-scaled score font
+            # while the abbreviation stays small, which makes the number the
+            # headline without costing the layout any width: three big digits
+            # either side would meet in the middle on a 192-wide panel, three
+            # small letters plus one big digit do not.
+            label_font = self.display_manager.font  # Use PressStart2P
+            score_font = self.fonts.get("score", label_font)
+            outline_color = (0, 0, 0)
+            label_text_color = (255, 255, 255)
+            # The run counts honour customization.score_text.text_color, as
+            # Recent's score already does; white when unset, as before.
+            color_getter = getattr(self, "_element_color", None)
+            score_text_color = (
+                color_getter("score_text") if color_getter else (255, 255, 255)
+            )
+
+            # Helper function for outlined text
+            def draw_bottom_outlined_text(x, y, text, font, fill=label_text_color):
+                self._draw_text_with_outline(
+                    draw_overlay,
+                    text,
+                    (x, y),
+                    font,
+                    fill=fill,
+                    outline_color=outline_color,
+                )
+
+            away_abbr = game["away_abbr"]
+            home_abbr = game["home_abbr"]
+            away_score_str = str(game["away_score"])
+            home_score_str = str(game["home_score"])
+
+            away_label = f"{away_abbr}:"
+            home_label = f"{home_abbr}:"
+
+            def ink_height(font):
+                try:
+                    box = font.getbbox("A")
+                    return box[3] - box[1]
+                except AttributeError:
+                    return 8  # Fallback for default font
+
+            label_height = ink_height(label_font)
+            score_height = ink_height(score_font)
+
+            # Both faces sit on a shared bottom edge, so the smaller one is
+            # pushed down by the difference rather than drawn at the same y --
+            # otherwise the abbreviation floats above the number it labels.
+            row_height = max(label_height, score_height)
+            row_y = self.display_height - row_height - 2  # 2px padding, bottom
+            label_y = row_y + (row_height - label_height)
+            score_y = row_y + (row_height - score_height)
+
+            def text_width(text, font):
+                box = draw_overlay.textbbox((0, 0), text, font=font)
+                return box[2] - box[0]
+
+            # Away Team:Score (Bottom Left)
+            away_x = 2  # 2 pixels padding from left
+            draw_bottom_outlined_text(away_x, label_y, away_label, label_font)
+            draw_bottom_outlined_text(
+                away_x + text_width(away_label, label_font), score_y,
+                away_score_str, score_font, score_text_color)
+
+            # Home Team:Score (Bottom Right)
+            home_width = (text_width(home_label, label_font)
+                          + text_width(home_score_str, score_font))
+            home_x = (
+                self.display_width - home_width - 2
+            )  # 2 pixels padding from right
+            draw_bottom_outlined_text(home_x, label_y, home_label, label_font)
+            draw_bottom_outlined_text(
+                home_x + text_width(home_label, label_font), score_y,
+                home_score_str, score_font, score_text_color)
+
+            # Draw gambling odds if available
+            if game.get("odds"):
+                # top_span: the inning is centred on the same top row, so odds
+                # that would overlap it step down a row (P-M17). A hidden
+                # inning (show_innings off) leaves that row free.
+                inning_drawn = game["is_final"] or getattr(self, "show_innings", True)
+                self._draw_dynamic_odds(
+                    draw_overlay, game["odds"], self.display_width, self.display_height,
+                    top_span=(inning_x, inning_x + inning_width) if inning_drawn else None,
+                )
+
+            # Composite the text overlay onto the main image
+            main_img = Image.alpha_composite(main_img, overlay)
+            main_img = main_img.convert("RGB")  # Convert for display
+            # The play-by-play banner along the bottom row, when one is due.
+            main_img = self._with_activity_popup(main_img, game)
+
+            # Display the final image
+            self.display_manager.image.paste(main_img, (0, 0))
+            self.display_manager.update_display()  # Update display here for live
+
+        except Exception as e:
+            self.logger.error(
+                f"Error displaying live Baseball game: {e}", exc_info=True
+            )

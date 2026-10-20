@@ -1,0 +1,41 @@
+{
+  "id": "abl-scoreboard",
+  "name": "ABL Scoreboard",
+  "version": "1.0.0",
+  "author": "StevenFay",
+  "description": "Live, recent and upcoming Australian Baseball League games, from the MLB Stats API, on ChuckBuilds' baseball scoreboard layouts.",
+  "category": "sports",
+  "tags": [
+    "abl",
+    "baseball",
+    "australia",
+    "sports",
+    "scoreboard",
+    "live-scores"
+  ],
+  "display_modes": [
+    "abl_live",
+    "abl_recent",
+    "abl_upcoming"
+  ],
+  "last_updated": "2026-10-20",
+  "stars": 0,
+  "downloads": 0,
+  "verified": false,
+  "screenshot": "",
+  "repo": "https://github.com/StevenFay/ledmatrix-abl",
+  "entry_point": "manager.py",
+  "class_name": "AblScoreboardPlugin",
+  "config_schema": "config_schema.json",
+  "compatible_versions": [
+    ">=3.8.7"
+  ],
+  "versions": [
+    {
+      "version": "1.0.0",
+      "released": "2026-10-20",
+      "ledmatrix_min_version": "3.8.7",
+      "notes": "First release, adapted from ChuckBuilds' baseball-scoreboard 1.66.0 (ledmatrix-plugins d43e302). Its minor-league path (MLB Stats API) reads the ABL instead: sport 17, league 595, in Australian dates, all season (November-February), refreshed every 30 minutes, with team logos from MLB's image server and seven-inning games read as complete. MLB and NCAA Baseball are switched off."
+    }
+  ]
+}

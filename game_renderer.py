@@ -1,0 +1,1179 @@
+"""
+Game Card Renderer for Baseball Scoreboard Plugin
+
+Renders individual baseball game cards as PIL Images for use in scroll mode.
+Returns images instead of updating display directly.
+"""
+
+import logging
+from datetime import datetime
+from pathlib import Path
+import os
+from typing import Any, ClassVar, Dict, Optional, Tuple
+
+from PIL import Image, ImageDraw, ImageFont
+
+from baseball_timezone import resolve_timezone
+
+from src.common import sports_card as _card
+from src.common.sports_game_renderer import SportsGameRendererMixin
+from src.common.sports_card_wrappers import SportsCardWrappersMixin
+from src.common.sports_font_path import resolve_font_path as _resolve_font_path
+
+#: This plugin's own schema, for the shared font-size resolver.
+_SCHEMA_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'config_schema.json')
+
+
+# Maps the core FontManager's common-font family aliases (src/font_manager.py
+# `common_fonts`) to the real files in assets/fonts. A font config value may be
+# either one of these family names or a literal filename; aliases resolve here,
+# filenames pass through unchanged.
+FONT_ALIASES = {
+    "press_start": "PressStart2P-Regular.ttf",
+    "four_by_six": "4x6-font.ttf",
+    "five_by_seven": "5x7.bdf",
+}
+
+
+def resolve_font_name(font_name: str) -> str:
+    """Resolve a font family alias to its filename, leaving filenames as-is."""
+    return FONT_ALIASES.get(font_name, font_name)
+
+
+# Pillow compatibility: Image.Resampling.LANCZOS is available in Pillow >= 9.1
+# Fall back to Image.LANCZOS for older versions
+try:
+    RESAMPLE_FILTER = Image.Resampling.LANCZOS
+except AttributeError:
+    RESAMPLE_FILTER = Image.LANCZOS
+
+
+# Distinguishes "the caller did not say" from "the caller says the top row is
+# empty". Both were None, so a card that genuinely centres nothing up there
+# fell back to measuring an inning it does not draw.
+_DERIVE_TOP_SPAN = object()
+
+
+
+def _bdf_pixel_size(path):
+    """The pixel size a .bdf font declares, or None if it does not."""
+    try:
+        with open(path, "r", encoding="latin-1") as handle:
+            for line in handle:
+                if line.startswith("PIXEL_SIZE"):
+                    return int(line.split()[1])
+                if line.startswith("CHARS"):
+                    break  # past the header; no point reading the glyphs
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+class GameRenderer(SportsCardWrappersMixin, SportsGameRendererMixin):
+    """Renders individual baseball game cards as PIL Images."""
+
+    def __init__(
+        self,
+        display_width: int,
+        display_height: int,
+        config: Dict,
+        logo_cache: Optional[Dict[str, Image.Image]] = None,
+        custom_logger: Optional[logging.Logger] = None
+    ):
+        """
+        Initialize the game renderer.
+
+        Args:
+            display_width: Display width in pixels
+            display_height: Display height in pixels
+            config: Plugin configuration dictionary
+            logo_cache: Optional shared logo cache
+            custom_logger: Optional custom logger
+        """
+        self.display_width = display_width
+        self.display_height = display_height
+        self.config = config
+        self.logger = custom_logger or logging.getLogger(__name__)
+
+        # Use provided logo cache or create new one
+        self._logo_cache = logo_cache if logo_cache is not None else {}
+
+        # Rankings cache (populated externally via set_rankings_cache)
+        self._team_rankings_cache: Dict[str, int] = {}
+
+        # Load fonts
+        self.fonts = self._unshare_element_fonts(self._load_fonts())
+
+    def _load_fonts(self) -> Dict[str, ImageFont.FreeTypeFont]:
+        """Load fonts used by the scoreboard from config or use defaults."""
+        fonts = {}
+
+        # Get customization config
+        customization = self.config.get('customization', {})
+
+        # Load fonts from config with defaults for backward compatibility
+        score_config = customization.get('score_text', {})
+        period_config = customization.get('period_text', {})
+        team_config = customization.get('team_name', {})
+        status_config = customization.get('status_text', {})
+        detail_config = customization.get('detail_text', {})
+        # Falls back to detail_text so a config written before this
+        # setting existed keeps rendering odds exactly as it did.
+        odds_config = customization.get('odds_text') or detail_config
+        rank_config = customization.get('rank_text', {})
+
+        try:
+            fonts["score"] = self._load_custom_font(score_config, default_size=10, element_key='score_text')
+            fonts["time"] = self._load_custom_font(period_config, default_size=8, element_key='period_text')
+            fonts["team"] = self._load_custom_font(team_config, default_size=8, element_key='team_name')
+            fonts["status"] = self._load_custom_font(status_config, default_size=6, element_key='status_text', default_font='4x6-font.ttf')
+            fonts["detail"] = self._load_custom_font(detail_config, default_size=6, default_font='4x6-font.ttf', element_key='detail_text')
+            fonts["odds"] = self._load_custom_font(odds_config, default_size=6, default_font='4x6-font.ttf', element_key='odds_text')
+            fonts["rank"] = self._load_custom_font(rank_config, default_size=10, element_key='rank_text')
+            self.logger.debug("Successfully loaded fonts from config")
+        except Exception:
+            self.logger.exception("Error loading fonts, using defaults")
+            # Fallback to hardcoded defaults
+            try:
+                fonts["score"] = ImageFont.truetype(_resolve_font_path("assets/fonts/PressStart2P-Regular.ttf"), 8)
+                fonts["time"] = ImageFont.truetype(_resolve_font_path("assets/fonts/PressStart2P-Regular.ttf"), 8)
+                fonts["team"] = ImageFont.truetype(_resolve_font_path("assets/fonts/PressStart2P-Regular.ttf"), 8)
+                fonts["status"] = ImageFont.truetype(_resolve_font_path("assets/fonts/4x6-font.ttf"), 7)
+                fonts["detail"] = ImageFont.truetype(_resolve_font_path("assets/fonts/4x6-font.ttf"), 7)
+                fonts["rank"] = ImageFont.truetype(_resolve_font_path("assets/fonts/PressStart2P-Regular.ttf"), 8)
+            except IOError:
+                self.logger.warning("Fonts not found, using default PIL font.")
+                default_font = ImageFont.load_default()
+                fonts = {k: default_font for k in ["score", "time", "team", "status", "detail", "rank"]}
+
+        return fonts
+
+    #: Sizes each pixel font renders crisply at. Off the grid the glyphs are
+    #: anti-aliased, and on an LED matrix a part-lit pixel reads as a dim
+    #: lamp rather than a soft edge.
+    _FONT_PIXEL_GRID = {
+        'PressStart2P-Regular.ttf': 8,   # crisp at 8, 16, 24, 32, 40
+        '4x6-font.ttf': 7,               # crisp at 7, 14, 21, 28, 35
+    }
+
+    #: baseball-scoreboard's schema offers font FAMILY ALIASES rather than
+    #: filenames, and a config saved through the web UI stores the alias. Kept
+    #: out of _FONT_PIXEL_GRID so that table stays a map of real files.
+    _FONT_NAME_ALIASES = {
+        'press_start': 'PressStart2P-Regular.ttf',
+        'four_by_six': '4x6-font.ttf',
+    }
+
+    def _schema_font_size(self, element_key):
+        """Delegates to src.common.sports_card, shared by every scoreboard."""
+        return _card.schema_font_size(_SCHEMA_PATH, element_key)
+
+    def _resolve_font_size(self, element_config, element_key, default_size, font_name):
+        """Delegates to src.common.sports_card, shared by every scoreboard."""
+        return _card.resolve_font_size(_SCHEMA_PATH, element_config, element_key,
+                                       default_size, font_name,
+                                       self._FONT_NAME_ALIASES, self._FONT_PIXEL_GRID)
+
+    def _load_custom_font(self, element_config: Dict[str, Any], default_size: int = 8, default_font: str = 'PressStart2P-Regular.ttf', element_key=None) -> ImageFont.FreeTypeFont:
+        """Load a custom font from an element configuration dictionary."""
+        font_name = element_config.get('font', default_font)
+        # Resolve a family alias to its filename BEFORE the path is built.
+        # The grid table understands aliases, so a configured
+        # "four_by_six" was sized on the 4x6 grid (7px) while the path
+        # lookup used the raw alias, missed, and fell back to
+        # PressStart2P -- rendering 7px on an 8px grid, anti-aliased.
+        font_name = self._FONT_NAME_ALIASES.get(font_name, font_name)
+        font_size = self._resolve_font_size(
+            element_config, element_key, default_size, font_name)
+        # Resolve family aliases (e.g. "press_start") to real filenames, then build path
+        font_path = _resolve_font_path(os.path.join('assets', 'fonts', resolve_font_name(font_name)))
+
+        try:
+            if os.path.exists(font_path):
+                if font_path.lower().endswith('.ttf') or font_path.lower().endswith('.otf'):
+                    return ImageFont.truetype(font_path, font_size)
+                elif font_path.lower().endswith('.bdf'):
+                    # FreeType reads BDF directly -- no pre-conversion needed.
+                    # This used to look for a .pil/.pbm pair produced by
+                    # pilfont.py, and no .pil ships anywhere, so every .bdf in
+                    # the picker warned and fell back to the default font.
+                    try:
+                        return ImageFont.truetype(font_path, font_size)
+                    except OSError:
+                        # A bitmap face exists at exactly the size it was drawn
+                        # at; FreeType rejects any other with "invalid pixel
+                        # size". Retry at the size the file declares.
+                        native = _bdf_pixel_size(font_path)
+                        if native is not None and native != font_size:
+                            try:
+                                return ImageFont.truetype(font_path, native)
+                            except OSError:
+                                pass
+                        self.logger.warning(
+                            f"Could not load BDF font {font_name} at {font_size} "
+                            f"or its native size")
+                else:
+                    self.logger.warning(f"Unknown font file type: {font_name}")
+            else:
+                self.logger.warning(f"Font file not found: {font_path}")
+        except Exception as e:
+            self.logger.warning(f"Error loading font {font_name}: {e}")
+
+        # Fallback to default font
+        default_font_path = _resolve_font_path(os.path.join('assets', 'fonts', 'PressStart2P-Regular.ttf'))
+        try:
+            if os.path.exists(default_font_path):
+                return ImageFont.truetype(default_font_path, font_size)
+        except Exception as e:
+            self.logger.warning(f"Error loading default font {default_font_path}: {e}")
+
+        return ImageFont.load_default()
+
+    def _get_logo_path(self, league: str, team_abbrev: str) -> Path:
+        """Get the logo path for a team based on league."""
+        if league == 'mlb':
+            return Path("assets/sports/mlb_logos") / f"{team_abbrev}.png"
+        elif league == 'abl':
+            return Path("assets/sports/abl_logos") / f"{team_abbrev}.png"
+        elif league == 'ncaa_baseball':
+            return Path("assets/sports/ncaa_logos") / f"{team_abbrev}.png"
+        else:
+            return Path("assets/sports/mlb_logos") / f"{team_abbrev}.png"
+
+    #: Decoded logos kept at once. Same cap and reasoning as the core's
+    #: SportsCore logo cache (LEDMatrix #559): a season of rotating slates
+    #: otherwise grows this without bound on a Pi.
+    _LOGO_CACHE_MAX: ClassVar[int] = 64
+
+    def _load_and_resize_logo(self, league: str, team_abbrev: str) -> Optional[Image.Image]:
+        """Load and resize a team logo, with caching.
+
+        The key carries the card size. The cache is handed in by the scroll
+        display and outlives any one renderer, and the thumbnail is sized from
+        this card's width and height -- keyed on league and team alone, a
+        renderer built at a different card size (a width probe, a resize, the
+        Vegas card) was served logos scaled for another card.
+        """
+        cache_key = f"{league}_{team_abbrev}_{self.display_width}x{self.display_height}"
+        if cache_key in self._logo_cache:
+            # Refresh recency. Works for the plain dict the scroll display
+            # passes as well as an OrderedDict: re-inserting moves it last.
+            cached = self._logo_cache.pop(cache_key)
+            self._logo_cache[cache_key] = cached
+            return cached
+
+        logo_path = self._get_logo_path(league, team_abbrev)
+
+        if not logo_path.exists():
+            self.logger.warning(f"Logo not found for {team_abbrev} at {logo_path}")
+            return None
+
+        try:
+            with Image.open(logo_path) as logo:
+                if logo.mode != 'RGBA':
+                    logo = logo.convert('RGBA')
+
+                # Crop transparent padding so scaling operates on actual content.
+                bbox = logo.getbbox()
+                if bbox:
+                    logo = logo.crop(bbox)
+                # ABL logos are landscape banner art (1.2–2.7:1 aspect ratio) —
+                # cap width at 1/3 of display width and height at full display height
+                # so they stay in their corner and never overlap center score text.
+                # All other leagues use the compact slot sizing.
+                if league == 'abl':
+                    max_logo_w = self.display_width // 3
+                    max_logo_h = self.display_height
+                else:
+                    max_logo_w = self._logo_slot_width()
+                    # Full card height, as football-scoreboard's card already
+                    # does. The 0.75 factor left every baseball mark a quarter
+                    # short of the height its slot allows -- and because the
+                    # slot is square (min(height, available)), a tall-ish mark
+                    # ran out of height first and so came out narrower too.
+                    # The slot already keeps the centre gap clear, so nothing
+                    # here can reach the score.
+                    max_logo_h = self.display_height
+                logo.thumbnail((max_logo_w, max_logo_h), RESAMPLE_FILTER)
+
+                # Copy before exiting context manager
+                cached_logo = logo.copy()
+
+            self._logo_cache[cache_key] = cached_logo
+            while len(self._logo_cache) > self._LOGO_CACHE_MAX:
+                # Oldest first: dicts iterate in insertion order, and a hit
+                # re-inserts, so the front is the least recently used.
+                self._logo_cache.pop(next(iter(self._logo_cache)))
+            return cached_logo
+
+        except OSError:
+            self.logger.exception(f"Error loading logo for {team_abbrev}")
+            return None
+
+    #: Which customization element owns each loaded face. The font loader
+    #: already picks each face from exactly that element (element_key=), so
+    #: resolving the colour from the face keeps the two in step by
+    #: construction, rather than by every draw site remembering to agree.
+    _ELEMENT_FOR_FONT: ClassVar[Dict[str, str]] = {
+        "odds": "odds_text",
+        "score": "score_text",
+        "time": "period_text",
+        "team": "team_name",
+        "status": "status_text",
+        "detail": "detail_text",
+        "rank": "rank_text",
+    }
+
+    def _draw_text_with_outline(self, draw, text, position, font,
+                               fill=None, outline_color=(0, 0, 0)):
+        """Draw text with a black outline for better readability."""
+        # Disable anti-aliasing: pixel/bitmap fonts (e.g. PressStart2P) get
+        # anti-aliased into dim partial-lit pixels on a 1:1 LED matrix, muddying
+        # glyphs. 1-bit mode keeps strokes crisp. See _draw_text_with_outline in
+        # sports.py for the same fix on the switch-mode renderer.
+        # Defaults to the configured colour for whichever element owns
+        # this face rather than to white, so customization.<element>.text_color
+        # reaches every draw. The schema has offered those pickers all along
+        # and they only ever changed the font. An explicit fill still wins:
+        # the odds colours and the favourite-result score tint mean something
+        # the palette does not.
+        if fill is None:
+            fill = self._font_color(font)
+        draw.fontmode = "1"
+        x, y = position
+        for dx, dy in [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]:
+            draw.text((x + dx, y + dy), text, font=font, fill=outline_color)
+        draw.text((x, y), text, font=font, fill=fill)
+
+    # ------------------------------------------------------------------
+    # Favorite-team result colors for finished games.
+    #
+    # This is the scroll/Vegas path, and it is where the setting earns its
+    # keep: a series against the same opponent scrolls past as several
+    # near-identical cards, so tinting the final score green or red is the
+    # only quick way to tell a win from a loss. Off by default -- the score
+    # keeps the color it has today until the user opts in.
+    # ------------------------------------------------------------------
+
+    FAVORITE_RESULT_COLOR_DEFAULTS: ClassVar[Dict[str, Tuple[int, int, int]]] = {
+        "win": (0, 255, 0),
+        "loss": (255, 0, 0),
+        "tie": (255, 200, 0),
+    }
+
+    def render_game_card(self, game: Dict, game_type: str) -> Image.Image:
+        """
+        Render a game card as a PIL Image.
+
+        Args:
+            game: Game dictionary
+            game_type: Type of game ('live', 'recent', 'upcoming')
+
+        Returns:
+            PIL Image of the rendered game card
+        """
+        if game_type == 'live':
+            return self._render_live_game(game)
+        elif game_type == 'recent':
+            return self._render_recent_game(game)
+        elif game_type == 'upcoming':
+            return self._render_upcoming_game(game)
+        else:
+            self.logger.error(f"Unknown game type: {game_type}")
+            return self._render_error_card("Unknown type")
+
+    def _render_live_game(self, game: Dict) -> Image.Image:
+        """Render a live baseball game card with full scorebug elements."""
+        try:
+            main_img = Image.new("RGBA", (self.display_width, self.display_height), (0, 0, 0, 255))
+            overlay = Image.new("RGBA", (self.display_width, self.display_height), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(overlay)
+            draw.fontmode = "1"  # Pixel fonts on an LED panel: 1-bit text so every lit pixel is fully lit (no AA fringe).
+
+            league = game.get('league', 'mlb')
+            home_logo = self._load_and_resize_logo(league, game.get('home_abbr', ''))
+            away_logo = self._load_and_resize_logo(league, game.get('away_abbr', ''))
+
+            if not home_logo or not away_logo:
+                return self._render_error_card("Logo Error")
+
+            center_y = self.display_height // 2
+
+            # Logos
+            logo_slot = self._logo_slot_width()
+            away_x = ((logo_slot - away_logo.width) // 2
+                  + self._layout_offset('away_logo', 'x_offset'))
+            main_img.paste(away_logo, (away_x, center_y - away_logo.height // 2), away_logo)
+            home_x = ((self.display_width - logo_slot) + (logo_slot - home_logo.width) // 2
+                  + self._layout_offset('home_logo', 'x_offset'))
+            main_img.paste(home_logo, (home_x, center_y - home_logo.height // 2), home_logo)
+
+            # display_options toggles for this game's league. Hidden elements
+            # keep their geometry, so the others do not move.
+            show_innings = self._scorebug_element_shown(game, 'show_innings')
+            show_bases = self._scorebug_element_shown(game, 'show_bases')
+            show_outs = self._scorebug_element_shown(game, 'show_outs')
+            show_count = self._scorebug_element_shown(game, 'show_count')
+
+            # Inning indicator (top center)
+            inning_half = game.get('inning_half', 'top')
+            inning_num = game.get('inning', 1)
+            if game.get('is_final'):
+                inning_text = "FINAL"
+            else:
+                symbol = "▲" if inning_half == 'top' else "▼"
+                inning_text = f"{symbol}{inning_num}"
+
+            inning_font = self.fonts['time']
+            inning_bbox = draw.textbbox((0, 0), inning_text, font=inning_font)
+            inning_width = inning_bbox[2] - inning_bbox[0]
+            inning_x = (self.display_width - inning_width) // 2
+            inning_y = 1
+            # "FINAL" is the status, not the inning, so show_innings keeps it.
+            inning_shown = show_innings or bool(game.get('is_final'))
+            if inning_shown:
+                self._draw_text_with_outline(draw, inning_text, (inning_x, inning_y), inning_font)
+
+            # Bases diamond + Outs circles
+            bases_occupied = game.get('bases_occupied', [False, False, False])
+            outs = game.get('outs', 0)
+
+            # Read configurable game display settings
+            customization = self.config.get('customization', {})
+            bases_cfg = customization.get('bases', {})
+            outs_cfg = customization.get('outs', {})
+            count_cfg = customization.get('count', {})
+
+            base_diamond_size = bases_cfg.get('diamond_size', 7)
+            out_circle_diameter = outs_cfg.get('circle_diameter', 3)
+            out_vertical_spacing = outs_cfg.get('spacing', 2)
+            spacing_between_bases_outs = outs_cfg.get('distance_from_bases', 3)
+            base_vert_spacing = 1
+            base_horiz_spacing = 1
+
+            base_cluster_height = base_diamond_size + base_vert_spacing + base_diamond_size
+            base_cluster_width = base_diamond_size + base_horiz_spacing + base_diamond_size
+
+            overall_start_y = inning_bbox[3] + 1 + bases_cfg.get('y_offset', 0)
+            bases_origin_x = (self.display_width - base_cluster_width) // 2 + bases_cfg.get('x_offset', 0)
+
+            # Outs column position (only needed when count data is available)
+            has_count_data = game.get('has_count_data', True)
+            out_cluster_height = 3 * out_circle_diameter + 2 * out_vertical_spacing
+            if has_count_data:
+                if inning_half == 'top':
+                    outs_column_x = bases_origin_x - spacing_between_bases_outs - out_circle_diameter
+                else:
+                    outs_column_x = bases_origin_x + base_cluster_width + spacing_between_bases_outs
+                outs_column_start_y = overall_start_y + (base_cluster_height // 2) - (out_cluster_height // 2)
+
+            # Draw bases as diamond polygons
+            h_d = base_diamond_size // 2
+            base_fill = tuple(bases_cfg.get('occupied_color', [255, 255, 255]))
+            base_outline = tuple(bases_cfg.get('empty_color', [255, 255, 255]))
+
+            # 2nd base (top center)
+            c2x = bases_origin_x + base_cluster_width // 2
+            c2y = overall_start_y + h_d
+            poly2 = [(c2x, overall_start_y), (c2x + h_d, c2y), (c2x, c2y + h_d), (c2x - h_d, c2y)]
+            if show_bases:
+                draw.polygon(poly2, fill=base_fill if bases_occupied[1] else None, outline=base_outline)
+
+            base_bottom_y = c2y + h_d
+
+            # 3rd base (bottom left)
+            c3x = bases_origin_x + h_d
+            c3y = base_bottom_y + base_vert_spacing + h_d
+            poly3 = [(c3x, base_bottom_y + base_vert_spacing), (c3x + h_d, c3y), (c3x, c3y + h_d), (c3x - h_d, c3y)]
+            if show_bases:
+                draw.polygon(poly3, fill=base_fill if bases_occupied[2] else None, outline=base_outline)
+
+            # 1st base (bottom right)
+            c1x = bases_origin_x + base_cluster_width - h_d
+            c1y = base_bottom_y + base_vert_spacing + h_d
+            poly1 = [(c1x, base_bottom_y + base_vert_spacing), (c1x + h_d, c1y), (c1x, c1y + h_d), (c1x - h_d, c1y)]
+            if show_bases:
+                draw.polygon(poly1, fill=base_fill if bases_occupied[0] else None, outline=base_outline)
+
+            # Outs circles (only when count data is available)
+            if has_count_data and show_outs:
+                outs_fill = tuple(outs_cfg.get('counted_color', [255, 255, 255]))
+                outs_empty = tuple(outs_cfg.get('empty_color', [100, 100, 100]))
+                for i in range(3):
+                    cx = outs_column_x
+                    cy = outs_column_start_y + i * (out_circle_diameter + out_vertical_spacing)
+                    coords = [cx, cy, cx + out_circle_diameter, cy + out_circle_diameter]
+                    if i < outs:
+                        draw.ellipse(coords, fill=outs_fill)
+                    else:
+                        draw.ellipse(coords, outline=outs_empty)
+
+            # Balls-strikes count (below bases, only when count data is available)
+            if has_count_data and show_count:
+                balls = game.get('balls', 0)
+                strikes = game.get('strikes', 0)
+                count_text = f"{balls}-{strikes}"
+                count_font = self.fonts['detail']
+                count_width = draw.textlength(count_text, font=count_font)
+                count_y = overall_start_y + base_cluster_height + count_cfg.get('y_offset', 2)
+                count_x = bases_origin_x + (base_cluster_width - count_width) // 2
+                count_text_color = tuple(count_cfg.get('text_color', [255, 255, 255]))
+                self._draw_text_with_outline(draw, count_text, (int(count_x), count_y), count_font, fill=count_text_color)
+
+            # Score (centered between logos, below bases/count cluster)
+            score_font = self.fonts['score']
+            score_text = f"{game.get('away_score', '0')}-{game.get('home_score', '0')}"
+            score_width = draw.textlength(score_text, font=score_font)
+            score_x = ((self.display_width - score_width) // 2
+                       + self._layout_offset('score', 'x_offset'))
+            try:
+                font_height = score_font.getbbox("A")[3] - score_font.getbbox("A")[1]
+            except AttributeError:
+                font_height = 8
+            cluster_bottom = overall_start_y + base_cluster_height
+            if has_count_data:
+                cluster_bottom += 2 + 6  # count spacing + detail font height
+            bottom_limit = self.display_height - font_height - 2
+            # A few pixels of air under the bases/count cluster, so the score
+            # reads as its own line rather than part of the count.
+            score_y = max(0, min(cluster_bottom + 7, bottom_limit))
+            self._draw_text_with_outline(draw, score_text, (int(score_x), score_y), score_font)
+
+            # Odds
+            if game.get('odds'):
+                self._draw_dynamic_odds(
+                    draw, game['odds'], game=game,
+                    top_span=self._top_row_span(
+                        draw, inning_text if inning_shown else None, inning_font))
+
+            main_img = Image.alpha_composite(main_img, overlay)
+            return main_img.convert("RGB")
+
+        except Exception:
+            self.logger.exception("Error rendering live game")
+            return self._render_error_card("Display error")
+
+    def _render_recent_game(self, game: Dict) -> Image.Image:
+        """Render a recent baseball game card."""
+        try:
+            main_img = Image.new("RGBA", (self.display_width, self.display_height), (0, 0, 0, 255))
+            overlay = Image.new("RGBA", (self.display_width, self.display_height), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(overlay)
+            draw.fontmode = "1"  # Pixel fonts on an LED panel: 1-bit text so every lit pixel is fully lit (no AA fringe).
+
+            league = game.get('league', 'mlb')
+            home_logo = self._load_and_resize_logo(league, game.get('home_abbr', ''))
+            away_logo = self._load_and_resize_logo(league, game.get('away_abbr', ''))
+
+            if not home_logo or not away_logo:
+                return self._render_error_card("Logo Error")
+
+            center_y = self.display_height // 2
+
+            # Logos (tighter fit for recent)
+            logo_slot = self._logo_slot_width()
+            away_x = ((logo_slot - away_logo.width) // 2
+                  + self._layout_offset('away_logo', 'x_offset'))
+            main_img.paste(away_logo, (away_x, center_y - away_logo.height // 2), away_logo)
+            home_x = ((self.display_width - logo_slot) + (logo_slot - home_logo.width) // 2
+                  + self._layout_offset('home_logo', 'x_offset'))
+            main_img.paste(home_logo, (home_x, center_y - home_logo.height // 2), home_logo)
+
+            # "Final" (top center) -- or the game's own "Final/10" (extra
+            # innings, or "Final/7" for a ABL doubleheader), chosen exactly
+            # as the full-screen Recent scorebug in sports.py does.
+            status_text = self._final_status_text(
+                draw, game, away_logo, away_x, home_logo, home_x)
+
+            # The date of the finished game, when asked for. Placed before
+            # the top row is drawn because "top_line" spends that row on the
+            # date instead of the status.
+            date_text = self._recent_date_text(game)
+            date_row_top = self._recent_date_row_top()
+            placement = self._recent_date_placement(date_text, date_row_top)
+            top_text = date_text if placement == 'top_line' else status_text
+
+            top_font = (self.fonts.get('detail') or self.fonts['time']) \
+                if placement == 'top_line' else self.fonts['time']
+            top_width = draw.textlength(top_text, font=top_font)
+            top_x = (self.display_width - top_width) // 2
+            top_y = 1
+            if placement == 'top_line':
+                top_x += self._layout_offset('date', 'x_offset')
+                top_y += self._layout_offset('date', 'y_offset')
+            self._draw_text_with_outline(draw, top_text, (top_x, top_y), top_font)
+
+            # Score (centered). White, matching the switch-mode recent scorebug
+            # and every other scoreboard; this card used to be alone in drawing
+            # the final score gold.
+            score_text = f"{game.get('away_score', '0')}-{game.get('home_score', '0')}"
+            score_width = draw.textlength(score_text, font=self.fonts['score'])
+            score_x = ((self.display_width - score_width) // 2
+                       + self._layout_offset('score', 'x_offset'))
+            score_y = self.display_height - 14
+            self._draw_text_with_outline(draw, score_text, (score_x, score_y),
+                                        self.fonts['score'],
+                                        fill=self._recent_score_color(game, (255, 255, 255)))
+
+            # Date on its own row, in the clear strip between the status and
+            # the score. Drawn after the score so the two are measured from
+            # the same geometry, not before it by eye.
+            if placement == 'own_row':
+                date_font = self.fonts.get('detail') or self.fonts['time']
+                date_width = draw.textlength(date_text, font=date_font)
+                date_x = ((self.display_width - date_width) // 2
+                          + self._layout_offset('date', 'x_offset'))
+                self._draw_text_with_outline(
+                    draw, date_text,
+                    (date_x, date_row_top + self._layout_offset('date', 'y_offset')),
+                    date_font, fill=self._element_color('detail_text'))
+
+            # Records at bottom corners
+            self._draw_records(draw, game)
+
+            # Odds
+            if game.get('odds'):
+                self._draw_dynamic_odds(
+                    draw, game['odds'], game=game,
+                    top_span=self._top_row_span(draw, top_text, top_font))
+
+            main_img = Image.alpha_composite(main_img, overlay)
+            return main_img.convert("RGB")
+
+        except Exception:
+            self.logger.exception("Error rendering recent game")
+            return self._render_error_card("Display error")
+
+    # ------------------------------------------------------------------
+    # The date of a finished game on the scroll and Vegas card.
+    #
+    # The full-screen Recent scorebug has always drawn one along its bottom
+    # edge; this card never has, in this plugin or any sibling scoreboard.
+    # On a recent card the bottom edge is already the score, so the date has
+    # to go somewhere else, and where depends on the panel: a 64px card has
+    # a clear strip between the status row and the score, a 32px one does
+    # not. ``recent_date_position`` picks, and defaults to deciding by
+    # measurement rather than making the user work out which case they are
+    # in.
+    # ------------------------------------------------------------------
+
+    def _recent_date_text(self, game: Dict) -> str:
+        """The finished game's date, or "" when it is switched off.
+
+        Off by default: this card draws no date today, and a card is a
+        crowded place to start drawing one uninvited.
+
+        Formatted by ``date_format``, the shared scroll/Vegas key -- the
+        full-screen scorebug has its own ``switch_date_format``, and the two
+        disagree on their default for the reason that key documents.
+        """
+        if not self._scroll_card_option("recent_show_date", False):
+            return ""
+        return self._format_game_date(str(game.get('game_date') or ""), game)
+
+    def _recent_date_row_top(self) -> Optional[int]:
+        """Top y for a date row above the score, or None if it will not fit.
+
+        The card's middle column is clear -- the logos sit in the outer
+        slots -- so the only question is vertical: does a line of the detail
+        font fit between the bottom of the status row and the top of the
+        score. Measured from the fonts in use rather than assumed, because
+        both are configurable and a panel running a 10px status face has
+        less room than one running the 8px default.
+        """
+        date_font = self.fonts.get('detail') or self.fonts['time']
+        line_h = (getattr(date_font, 'size', 6) or 6) + 1
+        status_bottom = 1 + (getattr(self.fonts['time'], 'size', 8) or 8)
+        top = (self.display_height - 14) - line_h
+        return top if top >= status_bottom else None
+
+    def _recent_date_placement(self, date_text: str,
+                               date_row_top: Optional[int]) -> str:
+        """Where the date goes: 'own_row', 'top_line' or '' for nowhere.
+
+        'top_line' spends the status row on the date instead. That is a real
+        trade and not a loss: the card already shows a final score, so
+        "Final" is the least informative text on it, while the date is the
+        thing the score cannot tell you.
+
+        'auto' takes 'own_row' when one fits and falls back to 'top_line'
+        when it does not, so the same setting behaves sensibly on a 32px
+        panel and a 64px one. An explicit choice is honoured either way --
+        'own_row' on a panel with no room simply draws nothing rather than
+        overprinting the score, which is why this returns '' for that case.
+        """
+        if not date_text:
+            return ""
+        choice = str(self._scroll_card_option("recent_date_position", "auto")
+                     or "auto").lower()
+        if choice == "top_line":
+            return "top_line"
+        if choice == "own_row":
+            return "own_row" if date_row_top is not None else ""
+        return "own_row" if date_row_top is not None else "top_line"
+
+    def _scorebug_element_shown(self, game: Dict, key: str) -> bool:
+        """A live-card display_options toggle for this game's league.
+
+        The renderer holds the whole plugin config, so it reads the league
+        block the game came from, the way _draw_records does. Default on,
+        matching config_schema.json and baseball.py.
+        """
+        league_config = self.config.get(game.get('league', 'mlb')) or {}
+        display_options = league_config.get('display_options') or {}
+        return bool(display_options.get(key, True))
+
+    def _final_status_text(self, draw, game: Dict, away_logo, away_x: int,
+                           home_logo, home_x: int) -> str:
+        """"Final", or the game's "Final/N" when it fits between the logos.
+
+        Same rule as SportsRecent._draw_scorebug_layout in sports.py: baseball
+        never sets period_text, so extra innings arrive on status_text. Use it
+        when it is no wider than the visible gap between the logos (or than
+        the plain "Final" it replaces, where even that already overlaps them),
+        measured on the logos' opaque pixels because their canvases carry
+        transparent padding.
+        """
+        status_text = game.get('period_text', "Final")
+        extended = str(game.get('status_text') or "")
+        if 'period_text' in game or not extended.lower().startswith("final/"):
+            return status_text
+        font = self.fonts['time']
+        away_box = away_logo.getchannel("A").getbbox() if away_logo.mode == "RGBA" else None
+        home_box = home_logo.getchannel("A").getbbox() if home_logo.mode == "RGBA" else None
+        gap = ((home_x + (home_box[0] if home_box else 0))
+               - (away_x + (away_box[2] if away_box else away_logo.width)))
+        plain_width = draw.textlength(status_text, font=font)
+        if draw.textlength(extended, font=font) <= max(gap, plain_width):
+            return extended
+        return status_text
+
+    # ------------------------------------------------------------------
+    # Card options -- config["scroll_card"], plus the shared
+    # customization.layout offsets and per-element colours.
+    #
+    # The center-gap keys size this renderer's cards alone; they are read by
+    # SportsGameRendererMixin, which owns the geometry those keys drive. The
+    # rest -- upcoming_center, vs_text, the date and time formats -- are also
+    # read by
+    # sports.py's full-screen scorebug (SportsCore._draw_upcoming_center_switch
+    # and friends, gated there on switch_upcoming_center), so those two copies
+    # have to stay in step: a change to the formatting rules here needs the
+    # same change there, or the ticker and the scoreboard disagree.
+    # ------------------------------------------------------------------
+    _MONTH_ABBR: ClassVar[Tuple[str, ...]] = (
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    )
+    _WEEKDAY_ABBR: ClassVar[Tuple[str, ...]] = (
+        "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun",
+    )
+
+    def _logo_slot_width(self) -> int:
+        """Per-side logo slot, leaving the center gap clear.
+
+        Capped at display_height, so wide/short cards (128x32, 256x32) already
+        have a large middle and come out unchanged -- only the sizes where the
+        logos used to meet (128x64, 64x32) shrink.
+        """
+        available = (self.display_width - self._center_gap_width()) // 2
+        return max(8, min(self.display_height, available))
+
+    def _upcoming_date_time_texts(self, game: Dict):
+        """The date and time strings an upcoming card would draw."""
+        date_raw, time_raw = self._upcoming_date_and_time(game)
+        date_text = (self._format_game_date(date_raw, game)
+                     if self._scroll_card_option("show_date", True) else "")
+        time_text = (self._format_game_time(time_raw)
+                     if self._scroll_card_option("show_time", True) else "")
+        return date_text, time_text
+
+    def _draw_upcoming_game_status(self, draw: ImageDraw.Draw, game: Dict) -> None:
+        """Draw the date and time around an upcoming card.
+
+        Time top and date bottom by default; scroll_card.swap_date_time puts
+        the date on top instead. Skipped when the pair is stacked in the
+        middle, which would otherwise print them twice.
+        """
+        if self._upcoming_center_mode() == "date_time":
+            return
+
+        date_text, time_text = self._upcoming_date_time_texts(game)
+
+        if self._scroll_card_option("swap_date_time", False):
+            top_text, top_el, bottom_text, bottom_el = (
+                date_text, 'date', time_text, 'time')
+            top_font = self.fonts.get('detail') or self.fonts['time']
+            bottom_font = self.fonts['time']
+            top_color, bottom_color = 'detail_text', 'period_text'
+        else:
+            top_text, top_el, bottom_text, bottom_el = (
+                time_text, 'time', date_text, 'date')
+            top_font = self.fonts['time']
+            bottom_font = self.fonts.get('detail') or self.fonts['time']
+            top_color, bottom_color = 'period_text', 'detail_text'
+
+        if top_text:
+            top_width = draw.textlength(top_text, font=top_font)
+            top_x = (self.display_width - top_width) // 2 + self._layout_offset(top_el, 'x_offset')
+            top_y = 1 + self._layout_offset(top_el, 'y_offset')
+            self._draw_text_with_outline(
+                draw, top_text, (top_x, top_y), top_font,
+                fill=self._element_color(top_color)
+            )
+
+        if bottom_text:
+            bottom_width = draw.textlength(bottom_text, font=bottom_font)
+            bottom_x = ((self.display_width - bottom_width) // 2
+                        + self._layout_offset(bottom_el, 'x_offset'))
+            # Measured, not a fixed -7: the detail font is 6px in most plugins
+            # but 10px in soccer and nrl, where "Sep 19" ran past the card.
+            ink_bottom = draw.textbbox((0, 0), bottom_text, font=bottom_font)[3]
+            bottom_y = (max(0, self.display_height - ink_bottom - 1)
+                        + self._layout_offset(bottom_el, 'y_offset'))
+            self._draw_text_with_outline(
+                draw, bottom_text, (bottom_x, bottom_y), bottom_font,
+                fill=self._element_color(bottom_color)
+            )
+
+    def _render_upcoming_game(self, game: Dict) -> Image.Image:
+        """Render an upcoming baseball game card."""
+        try:
+            main_img = Image.new("RGBA", (self.display_width, self.display_height), (0, 0, 0, 255))
+            overlay = Image.new("RGBA", (self.display_width, self.display_height), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(overlay)
+            draw.fontmode = "1"  # Pixel fonts on an LED panel: 1-bit text so every lit pixel is fully lit (no AA fringe).
+
+            league = game.get('league', 'mlb')
+            home_logo = self._load_and_resize_logo(league, game.get('home_abbr', ''))
+            away_logo = self._load_and_resize_logo(league, game.get('away_abbr', ''))
+
+            if not home_logo or not away_logo:
+                return self._render_error_card("Logo Error")
+
+            center_y = self.display_height // 2
+
+            # Logos (tighter fit)
+            logo_slot = self._logo_slot_width()
+            away_x = ((logo_slot - away_logo.width) // 2
+                  + self._layout_offset('away_logo', 'x_offset'))
+            main_img.paste(away_logo, (away_x, center_y - away_logo.height // 2), away_logo)
+            home_x = ((self.display_width - logo_slot) + (logo_slot - home_logo.width) // 2
+                  + self._layout_offset('home_logo', 'x_offset'))
+            main_img.paste(home_logo, (home_x, center_y - home_logo.height // 2), home_logo)
+
+            # Game time/date from start_time
+            start_time = game.get('start_time', '')
+            game_date = ''
+            game_time = ''
+            if start_time:
+                try:
+                    dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                    local_tz = resolve_timezone(config=self.config, log=self.logger)
+                    dt_local = dt.astimezone(local_tz)
+                    # Numeric here; _format_game_date turns it into "Sep 19"
+                    # unless the user asked for the numeric form.
+                    # %-m/%-d/%-I are glibc extensions: strftime raises
+                    # ValueError on Windows and musl, and the except below then
+                    # dropped the start time and drew a raw ISO date in its
+                    # place. Build the same text portably instead.
+                    game_date = f"{dt_local.month}/{dt_local.day}"
+                    game_time = dt_local.strftime('%I:%M%p').lstrip('0')
+                except (ValueError, AttributeError):
+                    game_time = start_time[:10] if len(start_time) > 10 else start_time
+
+            # Same card as the other sports: the middle (VS, or the date and
+            # time stacked), then the surrounding date/time. Both honour the
+            # scroll_card settings and the customization.layout offsets.
+            upcoming = dict(game, game_date=game_date, game_time=game_time)
+            self._draw_upcoming_center(draw, upcoming)
+            self._draw_upcoming_game_status(draw, upcoming)
+
+            # Records at bottom corners
+            self._draw_records(draw, game)
+
+            # Odds
+            if game.get('odds'):
+                self._draw_dynamic_odds(
+                    draw, game['odds'], game=game,
+                    top_span=self._upcoming_top_row_span(draw, upcoming))
+
+            main_img = Image.alpha_composite(main_img, overlay)
+            return main_img.convert("RGB")
+
+        except Exception:
+            self.logger.exception("Error rendering upcoming game")
+            return self._render_error_card("Display error")
+
+    def _get_team_display_text(self, abbr: str, record: str, show_records: bool, show_ranking: bool) -> str:
+        """Get display text for a team (ranking or record)."""
+        if show_ranking:
+            rank = self._team_rankings_cache.get(abbr, 0)
+            if rank > 0:
+                return f"#{rank}"
+            if not show_records:
+                return ''
+        if show_records:
+            return record
+        return ''
+
+    def _draw_records(self, draw, game: Dict):
+        """Draw team records or rankings at bottom corners if enabled by config."""
+        league = game.get('league', 'mlb')
+        league_config = self.config.get(league, {})
+        display_options = league_config.get('display_options', {})
+        show_records = display_options.get('show_records', self.config.get('show_records', False))
+        show_ranking = display_options.get('show_ranking', self.config.get('show_ranking', False))
+
+        if not show_records and not show_ranking:
+            return
+
+        record_font = self.fonts['detail']
+        record_bbox = draw.textbbox((0, 0), "0-0", font=record_font)
+        record_height = record_bbox[3] - record_bbox[1]
+        record_y = self.display_height - record_height
+
+        # Away team (bottom left)
+        away_text = self._get_team_display_text(
+            game.get('away_abbr', ''), game.get('away_record', ''),
+            show_records, show_ranking
+        )
+        if away_text:
+            self._draw_text_with_outline(draw, away_text, (0, record_y), record_font)
+
+        # Home team (bottom right)
+        home_text = self._get_team_display_text(
+            game.get('home_abbr', ''), game.get('home_record', ''),
+            show_records, show_ranking
+        )
+        if home_text:
+            home_bbox = draw.textbbox((0, 0), home_text, font=record_font)
+            home_w = home_bbox[2] - home_bbox[0]
+            self._draw_text_with_outline(draw, home_text, (self.display_width - home_w, record_y), record_font)
+
+    def _get_layout_offset(self, element: str, axis: str, default: int = 0) -> int:
+        """Get layout offset for a specific element and axis from config."""
+        try:
+            layout_config = self.config.get('customization', {}).get('layout', {})
+            element_config = layout_config.get(element, {})
+            offset_value = element_config.get(axis, default)
+            if offset_value is None:
+                return default
+            if isinstance(offset_value, (int, float)):
+                return int(offset_value)
+            # Handle string values (e.g. "2.0" from config)
+            try:
+                return int(float(offset_value))
+            except (ValueError, TypeError):
+                self.logger.warning(f"Invalid layout offset for {element}.{axis}: '{offset_value}', using default {default}")
+                return default
+        except (TypeError, ValueError):
+            return default
+
+    def _inning_text(self, game: Optional[Dict]) -> str:
+        """The centred top-row text, built exactly as the scorebug draws it."""
+        if not game:
+            return ""
+        inning_half = game.get('inning_half', 'top')
+        inning_num = game.get('inning', 1)
+        if game.get('is_final'):
+            return "FINAL"
+        symbol = "\u25b2" if inning_half == 'top' else "\u25bc"
+        return f"{symbol}{inning_num}"
+
+    def _top_row_span(self, draw, text: str, font, x_offset: int = 0):
+        """The horizontal span a centred top-row string occupies, or None.
+
+        Mirrors how the cards place that text: centred, then nudged by the
+        element's configured x_offset. Returned as pixels rather than derived
+        from the text again later, because the three cards do not agree on the
+        font either -- an upcoming card with swap_date_time draws the date in
+        `detail`, not `time`.
+        """
+        if not text:
+            return None
+        try:
+            width = draw.textlength(text, font=font)
+        except Exception:
+            return None
+        left = int((self.display_width - width) // 2 + x_offset)
+        return left, int(left + width)
+
+    def _upcoming_top_row_span(self, draw, game: Dict):
+        """The span an upcoming card's top-row text occupies, or None.
+
+        Font and offset are chosen exactly as _draw_upcoming_game_status does,
+        so the odds are measured against what is really on the panel.
+        """
+        if self._upcoming_center_mode() == "date_time":
+            return None      # both are stacked in the middle; the top row is free
+        date_text, time_text = self._upcoming_date_time_texts(game)
+        if self._scroll_card_option("swap_date_time", False):
+            text, element = date_text, 'date'
+            font = self.fonts.get('detail') or self.fonts['time']
+        else:
+            text, element = time_text, 'time'
+            font = self.fonts['time']
+        return self._top_row_span(draw, text, font,
+                                  self._layout_offset(element, 'x_offset'))
+
+    def _odds_would_hit_top_row(self, span, placements) -> bool:
+        """Whether any odds text overlaps the centred text on the top row.
+
+        Baseball is the only scoreboard with something centred on that row, so
+        it is the only one that can collide. Deciding by measurement rather
+        than by panel size keeps the rule honest: what matters is whether these
+        particular strings fit beside each other, and a two-digit over/under is
+        several pixels wider than a one-digit one.
+
+        The text is passed in rather than derived, because the three cards do
+        not draw the same thing there: a live card shows the inning, a recent
+        card "Final", and an upcoming card a time or a date. Measuring the
+        inning for all three checked a string that was not on the panel.
+        """
+        if not span:
+            return False
+        left, right = span
+        # One pixel of breathing room either side, so glyphs do not touch.
+        return any(x < right + 1 and x + width > left - 1
+                   for _text, x, width in placements)
+
+    def _odds_color(self) -> Tuple[int, int, int]:
+        """Colour for the odds text; the green it always drew unless configured.
+
+        Guarded with getattr because not every class that reaches
+        _draw_dynamic_odds carries the element-colour helper -- the plugins'
+        own test harnesses build minimal manager objects, and a bare
+        AttributeError here is swallowed by the surrounding except, which
+        drops the odds off the card instead of failing loudly.
+        """
+        getter = getattr(self, "_element_color", None)
+        if getter is None:
+            return (0, 255, 0)
+        try:
+            return getter("odds_text", (0, 255, 0))
+        except Exception:
+            return (0, 255, 0)
+
+    def _draw_dynamic_odds(self, draw, odds: Dict, game: Optional[Dict] = None,
+                           top_span=_DERIVE_TOP_SPAN) -> None:
+        """Draw odds with dynamic positioning based on favored team.
+
+        `top_span` is the (left, right) the card's own top-row text occupies,
+        so the odds can step down a row when they would not fit beside it.
+        Callers pass the span they actually drew rather than a string, because
+        the three cards agree on neither the text, the font, nor the centring:
+        a recent card draws "Final" in `time`, an upcoming card a time in
+        `time` or -- with swap_date_time -- a date in `detail`, shifted by
+        that element's configured x_offset. When omitted it falls back to
+        measuring the live card's inning indicator, which is what `game` is
+        for; passing neither simply skips the check.
+        """
+        try:
+            if not odds:
+                return
+
+            home_team_odds = odds.get('home_team_odds', {})
+            away_team_odds = odds.get('away_team_odds', {})
+            home_spread = home_team_odds.get('spread_odds')
+            away_spread = away_team_odds.get('spread_odds')
+
+            # Get top-level spread as fallback (only when individual spread is truly missing)
+            top_level_spread = odds.get('spread')
+            if top_level_spread is not None:
+                if home_spread is None:
+                    home_spread = top_level_spread
+                if away_spread is None:
+                    away_spread = -top_level_spread if isinstance(
+                        top_level_spread, (int, float)) else None
+
+            # Determine favored team
+            home_favored = isinstance(home_spread, (int, float)) and home_spread < 0
+            away_favored = isinstance(away_spread, (int, float)) and away_spread < 0
+
+            favored_spread = None
+            favored_side = None
+
+            if home_favored:
+                favored_spread = home_spread
+                favored_side = 'home'
+            elif away_favored:
+                favored_spread = away_spread
+                favored_side = 'away'
+
+            # Get user-configurable layout offsets for odds
+            odds_x_offset = self._get_layout_offset('odds', 'x_offset')
+            odds_y_offset = self._get_layout_offset('odds', 'y_offset')
+
+            # Top edge, matching every other scoreboard. This used to sit a
+            # whole text row lower (status_bbox[3] + 2, which measured 8-10px
+            # depending on the detail font) to clear the centred inning text,
+            # but that made baseball the odd one out: the same element landed a
+            # third of a 32px card lower here than on football, basketball,
+            # soccer and the rest. Odds are drawn hard left and hard right
+            # while the inning sits centred, so they only meet on a narrow
+            # panel -- and odds_y_offset is there to nudge it when they do.
+            font = self.fonts.get('odds') or self.fonts['detail']
+
+            # Work out both texts and their spans before drawing either, so the
+            # row can be chosen once with full knowledge of what has to fit.
+            placements = []
+            if favored_spread is not None:
+                spread_text = str(favored_spread)
+                spread_width = draw.textlength(spread_text, font=font)
+                if favored_side == 'home':
+                    spread_x = self.display_width - spread_width + odds_x_offset
+                else:
+                    spread_x = 0 + odds_x_offset
+                placements.append((spread_text, spread_x, spread_width))
+
+            over_under = odds.get('over_under')
+            if over_under is not None and isinstance(over_under, (int, float)):
+                ou_text = f"O/U: {over_under}"
+                ou_width = draw.textlength(ou_text, font=font)
+                if favored_side == 'home':
+                    ou_x = 0 + odds_x_offset
+                elif favored_side == 'away':
+                    ou_x = self.display_width - ou_width + odds_x_offset
+                else:
+                    # No favourite: anchor to the same left edge the
+                    # home-favoured case uses. Centring put it on top of the
+                    # status text, which the card also centres on this row --
+                    # "Final" and "O/U: 47.5" rendered through each other. It
+                    # is also the assumption the side budget above is measured
+                    # against, which only holds for an edge-anchored label.
+                    ou_x = 0 + odds_x_offset
+                placements.append((ou_text, ou_x, ou_width))
+
+            if not placements:
+                return
+
+            odds_y = 0 + odds_y_offset
+            obstacle = top_span
+            if obstacle is _DERIVE_TOP_SPAN:
+                obstacle = self._top_row_span(
+                    draw, self._inning_text(game), self.fonts['time'])
+            if self._odds_would_hit_top_row(obstacle, placements):
+                # Step down one text row, which is where these used to live
+                # unconditionally. Measured rather than keyed to a panel size:
+                # it is the text widths that decide. With the default fonts on
+                # a 64px panel a spread alone clears the inning but any O/U
+                # reaches it, and a recent card's wider "Final" catches the
+                # spread too. From 128px up they fit beside all three cards'
+                # top rows and stay at the edge.
+                row = draw.textbbox((0, 0), "A", font=font)[3] + 2
+                odds_y += row
+
+            for text, x, _width in placements:
+                self._draw_text_with_outline(draw, text, (x, odds_y), font, fill=self._odds_color())
+
+        except Exception:
+            self.logger.exception("Error drawing odds")
+
+    def _render_error_card(self, message: str) -> Image.Image:
+        """Render an error message card."""
+        img = Image.new('RGB', (self.display_width, self.display_height), (0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        draw.fontmode = "1"  # Pixel fonts on an LED panel: 1-bit text so every lit pixel is fully lit (no AA fringe).
+        self._draw_text_with_outline(draw, message, (5, 5), self.fonts['status'])
+        return img

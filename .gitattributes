@@ -1,0 +1,9 @@
+# Prevent accidental secret commits
+*.env export-ignore
+*.key export-ignore
+*.pem export-ignore
+*secret* export-ignore
+*password* export-ignore
+config.json export-ignore
+config_secrets.json export-ignore
+

@@ -1,0 +1,2136 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ABL Scoreboard Plugin Configuration",
+  "description": "Configuration schema for the ABL Scoreboard plugin - live, recent and upcoming Australian Baseball League games",
+  "type": "object",
+  "properties": {
+    "scroll_card": {
+      "type": "object",
+      "title": "Matchup Card Layout",
+      "description": "Layout of an upcoming or in-progress matchup: the separator drawn between the two teams, and how the date and time are written. These apply to the scroll and Vegas cards and to the full-screen scoreboard alike -- the full-screen one is controlled by its own \"Middle of a Full-Screen Upcoming Scoreboard\" setting so it keeps the look it has always had until you change it. The center-gap settings size the scroll and Vegas card only.",
+      "x-advanced": true,
+      "properties": {
+        "upcoming_center": {
+          "type": "string",
+          "title": "Middle of an Upcoming Card",
+          "description": "What to show between the two logos before a game starts. Upcoming games never show a score, since the game has not been played.",
+          "enum": [
+            "vs",
+            "date_time",
+            "none"
+          ],
+          "default": "vs",
+          "x-options": {
+            "labels": {
+              "vs": "Matchup separator (VS / @ / at)",
+              "date_time": "Date and time, stacked",
+              "none": "Nothing"
+            }
+          }
+        },
+        "switch_upcoming_center": {
+          "type": "string",
+          "title": "Middle of a Full-Screen Upcoming Scoreboard",
+          "description": "What to show between the two logos on the full-screen (switch mode) scoreboard before a game starts. Defaults to the stacked date and time, which is what this display has always shown. Pick the matchup separator to use the same VS / @ / at text as the scroll and Vegas cards, or \"Same as scroll and Vegas\" to follow the setting above.",
+          "enum": [
+            "date_time",
+            "vs",
+            "none",
+            "inherit"
+          ],
+          "default": "date_time",
+          "x-options": {
+            "labels": {
+              "date_time": "Date and time, stacked",
+              "vs": "Matchup separator (VS / @ / at)",
+              "none": "Nothing",
+              "inherit": "Same as scroll and Vegas"
+            }
+          }
+        },
+        "vs_text": {
+          "type": "string",
+          "title": "Matchup Separator",
+          "description": "Text drawn between the two teams, e.g. VS, @, at, v. The away team is always on the left and the home team on the right, so \"at\" and \"@\" read correctly as \"away at home\". Leave blank to draw nothing.",
+          "default": "VS",
+          "maxLength": 4
+        },
+        "date_format": {
+          "type": "string",
+          "title": "Date Format",
+          "description": "How to write the date: abbrev \"Sep 19\", numeric \"9/19\", day_first \"19 Sep\", numeric_day_first \"19/9\", weekday \"Fri Sep 19\".",
+          "enum": [
+            "abbrev",
+            "numeric",
+            "day_first",
+            "numeric_day_first",
+            "weekday"
+          ],
+          "default": "day_first",
+          "x-options": {
+            "labels": {
+              "abbrev": "Sep 19",
+              "numeric": "9/19",
+              "day_first": "19 Sep",
+              "numeric_day_first": "19/9",
+              "weekday": "Fri Sep 19"
+            }
+          }
+        },
+        "switch_date_format": {
+          "type": "string",
+          "title": "Full-Screen Date Format",
+          "description": "How the date is written on the full-screen (switch mode) scoreboard. Defaults to \"9/19\", which is what this display has always drawn, so it does not change until you pick something else. Choose \"Same as scroll and Vegas\" to follow the Date Format setting above instead.",
+          "enum": [
+            "numeric",
+            "abbrev",
+            "day_first",
+            "numeric_day_first",
+            "weekday",
+            "inherit"
+          ],
+          "default": "numeric_day_first",
+          "x-advanced": true,
+          "x-options": {
+            "labels": {
+              "numeric": "9/19",
+              "abbrev": "Sep 19",
+              "day_first": "19 Sep",
+              "numeric_day_first": "19/9",
+              "weekday": "Fri Sep 19",
+              "inherit": "Same as scroll and Vegas"
+            }
+          }
+        },
+        "time_format": {
+          "type": "string",
+          "title": "Time Format",
+          "description": "12h shows \"7:00PM\"; 24h shows \"19:00\".",
+          "enum": [
+            "12h",
+            "24h"
+          ],
+          "default": "12h",
+          "x-options": {
+            "labels": {
+              "12h": "7:00PM  (12-hour)",
+              "24h": "19:00  (24-hour)"
+            }
+          }
+        },
+        "show_date": {
+          "type": "boolean",
+          "title": "Show Date",
+          "description": "Draw the date on upcoming cards.",
+          "default": true
+        },
+        "show_time": {
+          "type": "boolean",
+          "title": "Show Time",
+          "description": "Draw the start time on upcoming cards.",
+          "default": true
+        },
+        "recent_show_date": {
+          "type": "boolean",
+          "title": "Show Date (Recent Cards)",
+          "description": "Draw the date a finished game was played on the scroll and Vegas cards. Off by default because these cards have never drawn one and there is no spare row on a short panel - see Recent Date Position for where it goes. Written in the Date Format chosen above.",
+          "default": false
+        },
+        "recent_date_position": {
+          "type": "string",
+          "title": "Recent Date Position",
+          "enum": [
+            "auto",
+            "own_row",
+            "top_line"
+          ],
+          "description": "Where the recent card's date goes. \"Own row\" puts it in the clear strip between the FINAL line and the score, which needs a tall enough panel. \"Top line\" spends the FINAL line on the date instead - no loss on a card that is already showing a final score, and the only option that fits a 32px panel. \"Auto\" uses its own row where one fits and the top line where it does not.",
+          "default": "auto",
+          "x-advanced": true,
+          "x-options": {
+            "labels": {
+              "auto": "Auto (own row where it fits)",
+              "own_row": "Own row, above the score",
+              "top_line": "Top line, in place of FINAL"
+            }
+          }
+        },
+        "switch_show_date": {
+          "type": "boolean",
+          "title": "Show Date (Full-Screen)",
+          "description": "Draw the date on the full-screen (switch mode) upcoming scoreboard. Show Date above now applies only to the scroll and Vegas cards. Before this release it also hid the full-screen date, so a config that turned it off shows the date here again until this switch is turned off.",
+          "default": true
+        },
+        "switch_show_time": {
+          "type": "boolean",
+          "title": "Show Time (Full-Screen)",
+          "description": "Draw the start time on the full-screen (switch mode) upcoming scoreboard. Show Time above now applies only to the scroll and Vegas cards. Before this release it also hid the full-screen time, so a config that turned it off shows the time here again until this switch is turned off.",
+          "default": true
+        },
+        "switch_recent_show_date": {
+          "type": "boolean",
+          "title": "Show Date (Full-Screen Recent)",
+          "description": "Draw the date along the bottom of the full-screen (switch mode) recent scoreboard. That screen has always drawn it and there was no way to turn it off, so this defaults on and nothing changes until you clear it. It is now written in the Full-Screen Date Format below, which it used to ignore - a panel set to \"Sep 19\" showed \"9/19\" here.",
+          "default": true
+        },
+        "swap_date_time": {
+          "type": "boolean",
+          "title": "Swap Date and Time",
+          "description": "Put the date on top and the time along the bottom instead of the default.",
+          "default": false
+        },
+        "center_gap": {
+          "type": "integer",
+          "title": "Center Gap",
+          "description": "Pixels kept clear down the middle so the score or VS is not drawn over the team logos. Leave unset to scale with the card width. 0 restores the old edge-to-edge logos.",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "center_gap_ratio": {
+          "type": "number",
+          "title": "Center Gap Ratio",
+          "description": "Fraction of card width used for the centre gap when it is not pinned.",
+          "minimum": 0.0,
+          "maximum": 0.6,
+          "default": 0.28,
+          "x-advanced": true
+        },
+        "center_gap_min": {
+          "type": "integer",
+          "title": "Center Gap Minimum",
+          "description": "Lower bound in pixels for the scaled centre gap.",
+          "minimum": 0,
+          "maximum": 64,
+          "default": 22,
+          "x-advanced": true
+        },
+        "center_gap_max": {
+          "type": "integer",
+          "title": "Center Gap Maximum",
+          "description": "Upper bound in pixels for the scaled centre gap.",
+          "minimum": 0,
+          "maximum": 96,
+          "default": 40,
+          "x-advanced": true
+        }
+      }
+    },
+    "enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "Enable or disable the baseball scoreboard plugin"
+    },
+    "display_duration": {
+      "type": "number",
+      "default": 30,
+      "minimum": 5,
+      "maximum": 300,
+      "description": "Duration in seconds for the display controller to show this plugin mode before rotating to next plugin"
+    },
+    "update_interval": {
+      "x-advanced": true,
+      "type": "integer",
+      "default": 3600,
+      "minimum": 30,
+      "maximum": 86400,
+      "description": "How often to fetch new data in seconds HIDDEN: the manifest declares update_interval (60 s), and the core scheduler uses the manifest's value over this setting; while a game is live, get_update_interval() answers instead.",
+      "x-display": "hidden"
+    },
+    "game_display_duration": {
+      "type": "number",
+      "default": 15,
+      "minimum": 3,
+      "maximum": 60,
+      "description": "Duration in seconds to show each individual game before rotating to the next game within the same mode"
+    },
+    "timezone": {
+      "x-advanced": true,
+      "type": "string",
+      "default": "",
+      "description": "IANA timezone used to display event start times (e.g. America/Chicago). Leave blank to follow the LEDMatrix global timezone, or the system timezone if none is set. A bare \"UTC\" here is treated as a leftover from the old write-back bug and ignored when your global or system timezone disagrees — use \"Etc/UTC\" if you really want UTC."
+    },
+    "abl": {
+      "type": "object",
+      "title": "ABL Settings",
+      "description": "Australian Baseball League games, from the MLB Stats API.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Australian Baseball League games"
+        },
+        "favorite_teams": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "uniqueItems": true,
+          "maxItems": 120,
+          "description": "Favourite teams by code, e.g. BRI, SYD. 2026-27 teams: Adelaide Giants (ADE), Brisbane Bandits (BRI), Perth Heat (PER), Sydney Blue Sox (SYD)."
+        },
+        "exclude_teams": {
+          "x-advanced": true,
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "uniqueItems": true,
+          "maxItems": 120,
+          "description": "Team abbreviations to always hide from the live rotation and recent/final scores (e.g., to avoid spoilers if you're watching a game delayed). Takes priority over favorite_teams and every other filtering setting."
+        },
+        "display_modes": {
+          "type": "object",
+          "title": "Display Modes",
+          "description": "Control which game types to show",
+          "properties": {
+            "show_live": {
+              "type": "boolean",
+              "default": true,
+              "description": "Show live ABL games"
+            },
+            "show_recent": {
+              "type": "boolean",
+              "default": true,
+              "description": "Show recently completed ABL games"
+            },
+            "show_upcoming": {
+              "type": "boolean",
+              "default": true,
+              "description": "Show upcoming ABL games"
+            },
+            "live_display_mode": {
+              "x-advanced": true,
+              "type": "string",
+              "enum": [
+                "switch",
+                "scroll"
+              ],
+              "default": "switch",
+              "description": "Display mode for live games: 'switch' shows one game at a time, 'scroll' scrolls all games horizontally"
+            },
+            "recent_display_mode": {
+              "x-advanced": true,
+              "type": "string",
+              "enum": [
+                "switch",
+                "scroll"
+              ],
+              "default": "switch",
+              "description": "Display mode for recent games: 'switch' shows one game at a time, 'scroll' scrolls all games horizontally"
+            },
+            "upcoming_display_mode": {
+              "x-advanced": true,
+              "type": "string",
+              "enum": [
+                "switch",
+                "scroll"
+              ],
+              "default": "switch",
+              "description": "Display mode for upcoming games: 'switch' shows one game at a time, 'scroll' scrolls all games horizontally"
+            }
+          }
+        },
+        "scroll_settings": {
+          "type": "object",
+          "title": "Scroll Settings",
+          "description": "Settings for scroll display mode (when display mode is set to 'scroll')",
+          "properties": {
+            "scroll_speed": {
+              "x-advanced": true,
+              "type": "number",
+              "default": 50.0,
+              "minimum": 1.0,
+              "maximum": 200.0,
+              "description": "Scroll speed in pixels per second (default: 50). Higher values scroll faster."
+            },
+            "scroll_delay": {
+              "x-advanced": true,
+              "type": "number",
+              "default": 0.01,
+              "minimum": 0.001,
+              "maximum": 0.1,
+              "description": "Kept so saved configs still load; ignored. Scrolling is paced to the panel's refresh rate, and scroll_speed sets how fast it moves. HIDDEN: nothing reads it; scroll_speed is the only pacing control.",
+              "x-display": "hidden"
+            },
+            "gap_between_games": {
+              "x-advanced": true,
+              "type": "integer",
+              "default": 48,
+              "minimum": 8,
+              "maximum": 128,
+              "description": "Gap in pixels between game cards when scrolling"
+            },
+            "show_league_separators": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": true,
+              "description": "Show league icons between different leagues"
+            },
+            "dynamic_duration": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": true,
+              "description": "Automatically calculate display duration based on content width"
+            },
+            "game_card_width": {
+              "x-advanced": true,
+              "type": "integer",
+              "default": 128,
+              "minimum": 32,
+              "maximum": 512,
+              "description": "Width of each game card in scroll mode (pixels). Default 128, which suits a single 128px panel. On a wider chain raise it so each card stays readable - roughly display width divided by 3 shows about three games at once. Lower it to fit more games on screen at the cost of detail."
+            }
+          }
+        },
+        "live_priority": {
+          "x-advanced": true,
+          "type": "boolean",
+          "default": true,
+          "description": "Give live games priority over other modes. When enabled, live games will interrupt the normal mode rotation and be displayed immediately when available."
+        },
+        "celebration_enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a full-screen celebration takeover when a team scores or wins a live game: a ball diamond with a runner circling the bases for a run, a ball clearing the outfield wall under fireworks for a home run, both in the scoring team's colours with confetti and the scoring side's digits glowing. Home runs are told apart from other runs by ESPN's play-by-play. ABL's feed has no plays, so there every run is celebrated as a run."
+        },
+        "celebration_duration": {
+          "x-advanced": true,
+          "type": "integer",
+          "default": 8,
+          "minimum": 3,
+          "maximum": 30,
+          "description": "How long the run / home run / win celebration stays on screen (seconds)"
+        },
+        "celebrate_opponent_runs": {
+          "x-advanced": true,
+          "type": "boolean",
+          "default": false,
+          "description": "Also celebrate when the opponent scores, not just favorites (off by default). With no favorites set, every run in a shown game is celebrated."
+        },
+        "celebration_home_runs_only": {
+          "x-advanced": true,
+          "type": "boolean",
+          "default": false,
+          "description": "Only celebrate home runs (and wins); plain runs just update the scorebug"
+        },
+        "celebration_team_colors": {
+          "x-advanced": true,
+          "type": "boolean",
+          "default": true,
+          "description": "Draw the celebration in the scoring team's colours, read from its logo. Off uses a fixed navy and amber palette"
+        },
+        "celebration_confetti": {
+          "x-advanced": true,
+          "type": "boolean",
+          "default": true,
+          "description": "Fall team-coloured confetti, and launch the home-run fireworks, across the celebration screen"
+        },
+        "live_game_duration": {
+          "x-advanced": true,
+          "type": "integer",
+          "default": 30,
+          "minimum": 10,
+          "maximum": 120,
+          "description": "Duration in seconds to display each live game before rotating to the next. When a separate non-favorite duration is set, this applies to games with a favorite team; it applies to ALL live games when no favorite teams are configured."
+        },
+        "non_favorite_live_game_duration": {
+          "x-advanced": true,
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 120,
+          "description": "Duration in seconds for live games that do NOT involve a favorite team. Only applies when favorite teams are set AND non-favorite live games are shown ('show_favorite_teams_only' off, or 'show_all_live' on). 0 (default) = use live_game_duration for every live game (no change)."
+        },
+        "recent_game_duration": {
+          "x-advanced": true,
+          "type": "number",
+          "default": 15,
+          "minimum": 10,
+          "maximum": 120,
+          "description": "Duration in seconds to show each recent game before rotating to the next game. If not set, uses the top-level game_display_duration setting (default: 15 seconds)."
+        },
+        "upcoming_game_duration": {
+          "x-advanced": true,
+          "type": "number",
+          "default": 15,
+          "minimum": 10,
+          "maximum": 120,
+          "description": "Duration in seconds to show each upcoming game before rotating to the next game. If not set, uses the top-level game_display_duration setting (default: 15 seconds)."
+        },
+        "live_update_interval": {
+          "x-advanced": true,
+          "type": "integer",
+          "default": 30,
+          "minimum": 5,
+          "maximum": 300,
+          "description": "How often to update live game data (seconds)"
+        },
+        "recent_update_interval": {
+          "type": "integer",
+          "default": 3600,
+          "minimum": 60,
+          "maximum": 86400,
+          "description": "How often the finished-games list is rebuilt (seconds). This also sets how often a game that has just ended can appear. Lower it if you want results sooner; each rebuild is one request against a shared cache.",
+          "x-advanced": true
+        },
+        "upcoming_update_interval": {
+          "type": "integer",
+          "default": 3600,
+          "minimum": 60,
+          "maximum": 86400,
+          "description": "How often the upcoming-games list is rebuilt (seconds). Selection and the non-favorite rotation both run on the display side now, so this only governs how often NEW games enter the pool -- an hour is usually right for a schedule that changes daily.",
+          "x-advanced": true
+        },
+        "stale_game_timeout": {
+          "type": "integer",
+          "default": 300,
+          "minimum": 60,
+          "maximum": 3600,
+          "description": "How long a live game may go without an update before it is dropped from the rotation (seconds). Guards against a game the API stops reporting sitting on the board forever.",
+          "x-advanced": true
+        },
+        "odds_update_interval": {
+          "type": "integer",
+          "default": 3600,
+          "minimum": 60,
+          "maximum": 86400,
+          "description": "How often betting odds are refreshed for recent and upcoming games (seconds). Only matters when Show Odds is on.",
+          "x-advanced": true
+        },
+        "live_odds_update_interval": {
+          "type": "integer",
+          "default": 60,
+          "minimum": 30,
+          "maximum": 3600,
+          "description": "How often betting odds are refreshed for games in progress (seconds). Only matters when Show Odds is on.",
+          "x-advanced": true
+        },
+        "update_interval_seconds": {
+          "x-advanced": true,
+          "type": "integer",
+          "default": 3600,
+          "minimum": 30,
+          "maximum": 86400,
+          "description": "How often to fetch new data for this league (seconds) HIDDEN: nothing reads it. It seeds each league's base update interval, which every manager then replaces with its own (live_update_interval, recent_update_interval, upcoming_update_interval) before anything reads it; the core scheduler reads update_interval, not this key.",
+          "x-display": "hidden"
+        },
+        "game_limits": {
+          "type": "object",
+          "title": "Game Limits",
+          "description": "Control how many games to show",
+          "properties": {
+            "recent_games_to_show": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1,
+              "maximum": 20,
+              "description": "With favorites: N games per favorite team. Without favorites: N total games sorted by time."
+            },
+            "upcoming_games_to_show": {
+              "type": "integer",
+              "default": 1,
+              "minimum": 1,
+              "maximum": 20,
+              "description": "With favorites: N games per favorite team. Without favorites: N total games sorted by time."
+            },
+            "other_upcoming_games_to_show": {
+              "type": "integer",
+              "title": "Other upcoming games to show",
+              "description": "How many NON-favorite upcoming games to include when favorite teams are set but 'Show favorite teams only' is off. Your favorites are shown first, then this many other games. Set to 0 to show only your favorites. Ignored when 'Show favorite teams only' is on, or when no favorite teams are set.",
+              "default": 1,
+              "minimum": 0,
+              "maximum": 20,
+              "x-advanced": true
+            },
+            "other_recent_games_to_show": {
+              "type": "integer",
+              "title": "Other recent games to show",
+              "description": "How many NON-favorite recent games to include when favorite teams are set but 'Show favorite teams only' is off. Set to 0 to show only your favorites.",
+              "default": 1,
+              "minimum": 0,
+              "maximum": 20,
+              "x-advanced": true
+            },
+            "other_rotation_interval_seconds": {
+              "type": "integer",
+              "title": "Rotate other games every (seconds)",
+              "description": "How often (seconds) to advance the window of NON-favorite games, so the board works through the schedule over time instead of showing the same handful. Variety comes from this turnover rather than from a larger selection: a bigger selection makes a full cycle longer, which makes any given game appear less often. Set to 0 to keep a fixed selection. Only applies when favorite teams are set and 'Show favorite teams only' is off.",
+              "default": 1800,
+              "minimum": 0,
+              "maximum": 86400,
+              "x-advanced": true
+            },
+            "favorite_rotation_boost": {
+              "type": "integer",
+              "title": "Favorite game turns",
+              "description": "In switch mode, how many turns each favorite team's recent or upcoming game gets for every 1 turn other games get. The extra turns are spread through the rotation, and kept apart whenever there are enough other games to separate them. Set to 1 to show every game once per rotation.",
+              "default": 1,
+              "minimum": 1,
+              "maximum": 5,
+              "x-advanced": true
+            },
+            "other_games_min_quality": {
+              "type": "string",
+              "title": "Which other games to show",
+              "enum": [
+                "any",
+                "ranked"
+              ],
+              "description": "Which NON-favorite games are worth a slot. 'ranked' shows only games involving a nationally ranked team; 'any' is the old behaviour of whatever comes next chronologically. Your favorite teams are never filtered by this. A league with no national poll has nothing to rank against, so 'ranked' lets everything through there rather than emptying the slots. HIDDEN for this league: no national poll exists for it (_league_has_rankings matches college/ncaa leagues only), so \"ranked\" lets every game through and the setting has one meaningful value. Still live under NCAA Baseball.",
+              "default": "any",
+              "x-advanced": true,
+              "x-display": "hidden"
+            },
+            "other_games_divisions": {
+              "type": "array",
+              "title": "Divisions to include (other games)",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "fbs",
+                  "fcs",
+                  "other"
+                ]
+              },
+              "uniqueItems": true,
+              "default": [],
+              "description": "Which divisions the NON-favorite games may come from. At least one team has to be in a checked division, so with only FBS checked you still see a ranked FBS team hosting an FCS school, but two FCS teams playing each other are left out. Check FCS or Other to bring those in as well. Your favorite teams are never filtered by this, so a team from any division still always appears. FBS/FCS is a college FOOTBALL taxonomy and ESPN publishes those rosters for that league alone, so this setting does nothing in any other league -- no lookup is even attempted. HIDDEN: inert in this plugin. ESPN publishes division rosters for college-football alone (sports.py _DIVISION_GROUPS_BY_LEAGUE), so for MLB, ABL and NCAA Baseball the lookup returns nothing, the filter fails open, and no choice here can change what is shown. Kept declared so saved configs keep validating.",
+              "x-widget": "checkbox-group",
+              "x-advanced": true,
+              "x-display": "hidden"
+            }
+          }
+        },
+        "display_options": {
+          "type": "object",
+          "title": "Display Options",
+          "description": "Additional information to show",
+          "properties": {
+            "show_records": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": false,
+              "description": "Show team records (wins-losses)"
+            },
+            "show_ranking": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": false,
+              "description": "Show team rankings (when available) HIDDEN for this league: it has no poll, so the rank table is always empty -- and because a rank badge replaces the record outright, turning this on erased the records that Show Records was drawing. Still live under NCAA Baseball.",
+              "x-display": "hidden"
+            },
+            "show_odds": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": false,
+              "description": "Show betting odds. HIDDEN: odds come from ESPN, which doesn't carry the ABL. Kept declared so saved configs keep validating.",
+              "x-display": "hidden"
+            },
+            "show_innings": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": true,
+              "description": "Show the inning (arrow and number) at the top of the live scorebug. A finished game's FINAL is always shown."
+            },
+            "show_bases": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": true,
+              "description": "Show the base-runner diamonds on the live scorebug"
+            },
+            "show_outs": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": true,
+              "description": "Show the outs indicator on the live scorebug."
+            },
+            "show_count": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": true,
+              "description": "Show the balls-strikes count on the live scorebug."
+            },
+            "show_series_summary": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": false,
+              "description": "Show where the teams stand in the current series (postseason) on the finished-game scorebug, in the bottom row beside the date."
+            }
+          }
+        },
+        "filtering": {
+          "type": "object",
+          "title": "Filtering Options",
+          "description": "Control which teams are shown",
+          "properties": {
+            "show_favorite_teams_only": {
+              "type": "boolean",
+              "default": true,
+              "description": "Only show games from favorite teams"
+            },
+            "show_all_live": {
+              "type": "boolean",
+              "default": false,
+              "description": "Show all live games, not just favorites"
+            },
+            "favorite_live_boost": {
+              "x-advanced": true,
+              "type": "integer",
+              "default": 2,
+              "minimum": 1,
+              "maximum": 5,
+              "description": "How many turns your favorite team's live game gets in the rotation for every 1 turn other live games get. Your favorite's game is also always queued first whenever the live rotation refreshes. Set to 1 for even rotation."
+            }
+          }
+        },
+        "mode_durations": {
+          "type": "object",
+          "title": "Mode Duration Overrides",
+          "description": "Override how long each mode displays before rotating",
+          "properties": {
+            "recent_mode_duration": {
+              "x-advanced": true,
+              "type": [
+                "number",
+                "null"
+              ],
+              "default": null,
+              "minimum": 10,
+              "maximum": 600,
+              "description": "Override display duration for recent games mode (seconds). Null uses default."
+            },
+            "upcoming_mode_duration": {
+              "x-advanced": true,
+              "type": [
+                "number",
+                "null"
+              ],
+              "default": null,
+              "minimum": 10,
+              "maximum": 600,
+              "description": "Override display duration for upcoming games mode (seconds). Null uses default."
+            },
+            "live_mode_duration": {
+              "x-advanced": true,
+              "type": [
+                "number",
+                "null"
+              ],
+              "default": null,
+              "minimum": 10,
+              "maximum": 600,
+              "description": "Override display duration for live games mode (seconds). Null uses default."
+            }
+          }
+        },
+        "dynamic_duration": {
+          "type": "object",
+          "title": "ABL Dynamic Duration Settings",
+          "description": "Configure dynamic duration settings for ABL games.",
+          "properties": {
+            "enabled": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": false,
+              "description": "Enable dynamic duration for ABL games"
+            },
+            "min_duration_seconds": {
+              "x-advanced": true,
+              "type": "number",
+              "minimum": 10,
+              "maximum": 300,
+              "default": 30,
+              "description": "Minimum total duration in seconds for this mode, even if few games are available. Ensures the mode stays visible long enough."
+            },
+            "max_duration_seconds": {
+              "x-advanced": true,
+              "type": "number",
+              "minimum": 60,
+              "maximum": 600,
+              "description": "Maximum total duration in seconds for this mode, even if many games are available."
+            },
+            "modes": {
+              "type": "object",
+              "title": "Per-Mode Settings for ABL",
+              "description": "Configure dynamic duration for specific ABL modes",
+              "properties": {
+                "live": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "x-advanced": true,
+                      "type": "boolean",
+                      "default": false,
+                      "description": "Enable dynamic duration for ABL live games"
+                    },
+                    "min_duration_seconds": {
+                      "x-advanced": true,
+                      "type": "number",
+                      "minimum": 10,
+                      "maximum": 300,
+                      "description": "Minimum duration for ABL live mode"
+                    },
+                    "max_duration_seconds": {
+                      "x-advanced": true,
+                      "type": "number",
+                      "minimum": 60,
+                      "maximum": 600,
+                      "description": "Max duration for ABL live games"
+                    }
+                  }
+                },
+                "recent": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "x-advanced": true,
+                      "type": "boolean",
+                      "default": false,
+                      "description": "Enable dynamic duration for ABL recent games"
+                    },
+                    "min_duration_seconds": {
+                      "x-advanced": true,
+                      "type": "number",
+                      "minimum": 10,
+                      "maximum": 300,
+                      "description": "Minimum duration for ABL recent mode"
+                    },
+                    "max_duration_seconds": {
+                      "x-advanced": true,
+                      "type": "number",
+                      "minimum": 60,
+                      "maximum": 600,
+                      "description": "Max duration for ABL recent games"
+                    }
+                  }
+                },
+                "upcoming": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "x-advanced": true,
+                      "type": "boolean",
+                      "default": false,
+                      "description": "Enable dynamic duration for ABL upcoming games"
+                    },
+                    "min_duration_seconds": {
+                      "x-advanced": true,
+                      "type": "number",
+                      "minimum": 10,
+                      "maximum": 300,
+                      "description": "Minimum duration for ABL upcoming mode"
+                    },
+                    "max_duration_seconds": {
+                      "x-advanced": true,
+                      "type": "number",
+                      "minimum": 60,
+                      "maximum": 600,
+                      "description": "Max duration for ABL upcoming games"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "customization": {
+      "type": "object",
+      "title": "Display Customization",
+      "description": "Customize fonts, colors, and layout positioning for scoreboard elements",
+      "x-style-modes": [
+        "live",
+        "upcoming",
+        "recent"
+      ],
+      "properties": {
+        "score_text": {
+          "type": "object",
+          "title": "Score Text",
+          "description": "Customize the score display",
+          "properties": {
+            "font": {
+              "x-advanced": true,
+              "type": "string",
+              "default": "PressStart2P-Regular.ttf",
+              "description": "Font family for score text"
+            },
+            "font_size": {
+              "x-advanced": true,
+              "type": "integer",
+              "default": 10,
+              "description": "Font size for score text"
+            },
+            "text_color": {
+              "type": "array",
+              "title": "Text Color",
+              "description": "Colour [R, G, B] for the score text on scroll/Vegas cards.",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "minItems": 3,
+              "maxItems": 3,
+              "default": [
+                255,
+                255,
+                255
+              ],
+              "x-advanced": true
+            }
+          },
+          "additionalProperties": false
+        },
+        "status_text": {
+          "type": "object",
+          "title": "Status Text",
+          "description": "Customize the status/inning display",
+          "properties": {
+            "font": {
+              "x-advanced": true,
+              "type": "string",
+              "default": "4x6-font.ttf",
+              "description": "Font family for status text"
+            },
+            "font_size": {
+              "x-advanced": true,
+              "type": "integer",
+              "default": 6,
+              "description": "Font size for status text"
+            },
+            "text_color": {
+              "type": "array",
+              "title": "Text Color",
+              "description": "Colour [R, G, B] for the status text on scroll/Vegas cards.",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "minItems": 3,
+              "maxItems": 3,
+              "default": [
+                255,
+                255,
+                255
+              ],
+              "x-advanced": true
+            }
+          },
+          "additionalProperties": false
+        },
+        "detail_text": {
+          "type": "object",
+          "title": "Detail Text",
+          "description": "Customize detail text (records, etc.)",
+          "properties": {
+            "font": {
+              "x-advanced": true,
+              "type": "string",
+              "default": "4x6-font.ttf",
+              "description": "Font family for detail text"
+            },
+            "font_size": {
+              "x-advanced": true,
+              "type": "integer",
+              "default": 6,
+              "description": "Font size for detail text"
+            },
+            "text_color": {
+              "type": "array",
+              "title": "Text Color",
+              "description": "Colour [R, G, B] for the detail text on scroll/Vegas cards.",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "minItems": 3,
+              "maxItems": 3,
+              "default": [
+                255,
+                255,
+                255
+              ],
+              "x-advanced": true
+            }
+          },
+          "additionalProperties": false
+        },
+        "odds_text": {
+          "type": "object",
+          "title": "Odds Text",
+          "description": "Customize the betting line and over/under text.",
+          "properties": {
+            "font": {
+              "x-advanced": true,
+              "type": "string",
+              "default": "4x6-font.ttf",
+              "description": "Font family for odds text. Defaults to the same 4x6 font the detail text uses; press_start is chunkier and easier to read on a large panel, but roughly twice as wide."
+            },
+            "font_size": {
+              "x-advanced": true,
+              "type": "integer",
+              "default": 6,
+              "description": "Font size for odds text. Sizes snap to the font's pixel grid to stay crisp: 4x6-font.ttf snaps to 7, 14, 21; press_start to 8, 16."
+            },
+            "text_color": {
+              "type": "array",
+              "title": "Text Color",
+              "description": "Colour [R, G, B] for the odds text.",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "minItems": 3,
+              "maxItems": 3,
+              "default": [
+                0,
+                255,
+                0
+              ],
+              "x-advanced": true
+            }
+          },
+          "additionalProperties": false
+        },
+        "layout": {
+          "type": "object",
+          "title": "Layout Positioning",
+          "description": "Adjust X,Y coordinate offsets for elements. Values are relative to default positions. Use negative values to move left/up, positive to move right/down.",
+          "properties": {
+            "home_logo": {
+              "type": "object",
+              "title": "Home Team Logo",
+              "properties": {
+                "x_offset": {
+                  "x-advanced": true,
+                  "type": "integer",
+                  "default": 0,
+                  "description": "Horizontal offset from default position (default: 0)"
+                },
+                "y_offset": {
+                  "x-advanced": true,
+                  "type": "integer",
+                  "default": 0,
+                  "description": "Vertical offset from default position (default: 0)"
+                }
+              },
+              "additionalProperties": false
+            },
+            "away_logo": {
+              "type": "object",
+              "title": "Away Team Logo",
+              "properties": {
+                "x_offset": {
+                  "x-advanced": true,
+                  "type": "integer",
+                  "default": 0,
+                  "description": "Horizontal offset from default position (default: 0)"
+                },
+                "y_offset": {
+                  "x-advanced": true,
+                  "type": "integer",
+                  "default": 0,
+                  "description": "Vertical offset from default position (default: 0)"
+                }
+              },
+              "additionalProperties": false
+            },
+            "score": {
+              "type": "object",
+              "title": "Game Score",
+              "properties": {
+                "x_offset": {
+                  "x-advanced": true,
+                  "type": "integer",
+                  "default": 0,
+                  "description": "Horizontal offset from center (default: 0)"
+                },
+                "y_offset": {
+                  "x-advanced": true,
+                  "type": "integer",
+                  "default": 0,
+                  "description": "Vertical offset from center (default: 0)"
+                }
+              },
+              "additionalProperties": false
+            },
+            "date": {
+              "type": "object",
+              "title": "Game Date",
+              "description": "Moves the date along the bottom of the recent scoreboard and the date on an upcoming card.",
+              "properties": {
+                "x_offset": {
+                  "x-advanced": true,
+                  "type": "integer",
+                  "default": 0,
+                  "description": "Horizontal offset from default position (default: 0)"
+                },
+                "y_offset": {
+                  "x-advanced": true,
+                  "type": "integer",
+                  "default": 0,
+                  "description": "Vertical offset from default position (default: 0)"
+                }
+              },
+              "additionalProperties": false
+            },
+            "time": {
+              "type": "object",
+              "title": "Game Time",
+              "description": "Moves the start time on the upcoming scoreboard and on an upcoming card.",
+              "properties": {
+                "x_offset": {
+                  "x-advanced": true,
+                  "type": "integer",
+                  "default": 0,
+                  "description": "Horizontal offset from center (default: 0)"
+                },
+                "y_offset": {
+                  "x-advanced": true,
+                  "type": "integer",
+                  "default": 0,
+                  "description": "Vertical offset from default position (default: 0)"
+                }
+              },
+              "additionalProperties": false
+            },
+            "status": {
+              "type": "object",
+              "title": "Game Status/Inning",
+              "properties": {
+                "x_offset": {
+                  "x-advanced": true,
+                  "type": "integer",
+                  "default": 0,
+                  "description": "Horizontal offset from default position (default: 0)"
+                },
+                "y_offset": {
+                  "x-advanced": true,
+                  "type": "integer",
+                  "default": 0,
+                  "description": "Vertical offset from default position (default: 0)"
+                }
+              },
+              "additionalProperties": false,
+              "description": "Moves \"Next Game\" on the upcoming scoreboard and \"Final\" on the recent one. Also accepted as status_text in a hand-edited config."
+            },
+            "record": {
+              "type": "object",
+              "title": "Team Records",
+              "properties": {
+                "x_offset": {
+                  "x-advanced": true,
+                  "x-display": "hidden",
+                  "type": "integer",
+                  "default": 0,
+                  "description": "Horizontal offset from default position (default: 0) HIDDEN: nothing reads it. The two records sit at opposite edges and move with away_x_offset / home_x_offset. Kept declared so saved configs keep validating."
+                },
+                "y_offset": {
+                  "x-advanced": true,
+                  "type": "integer",
+                  "default": 0,
+                  "description": "Vertical offset from default position (default: 0)"
+                },
+                "away_x_offset": {
+                  "x-advanced": true,
+                  "type": "integer",
+                  "default": 0,
+                  "description": "Horizontal offset for the away record, drawn from the left edge (default: 0)"
+                },
+                "home_x_offset": {
+                  "x-advanced": true,
+                  "type": "integer",
+                  "default": 0,
+                  "description": "Horizontal offset for the home record, drawn from the right edge (default: 0)"
+                }
+              },
+              "additionalProperties": false,
+              "description": "Moves the win-loss record (or rank badge) in the bottom corners on the recent and upcoming scoreboards. Also accepted as records in a hand-edited config. These are the only offsets the rank badge has: it is drawn in the record slot, so layout.ranking has no effect."
+            },
+            "ranking": {
+              "type": "object",
+              "title": "Team Rankings",
+              "properties": {
+                "x_offset": {
+                  "x-advanced": true,
+                  "type": "integer",
+                  "default": 0,
+                  "description": "Horizontal offset from default position (default: 0)"
+                },
+                "y_offset": {
+                  "x-advanced": true,
+                  "type": "integer",
+                  "default": 0,
+                  "description": "Vertical offset from default position (default: 0)"
+                }
+              },
+              "additionalProperties": false,
+              "x-display": "hidden",
+              "description": "HIDDEN: no reader. The rank badge shares the records row and is positioned by the Record offsets above."
+            },
+            "odds": {
+              "type": "object",
+              "title": "Betting Odds",
+              "properties": {
+                "x_offset": {
+                  "x-advanced": true,
+                  "type": "integer",
+                  "default": 0,
+                  "description": "Horizontal offset from default position (default: 0)"
+                },
+                "y_offset": {
+                  "x-advanced": true,
+                  "type": "integer",
+                  "default": 0,
+                  "description": "Vertical offset from default position (default: 0)"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "x-propertyOrder": [
+            "home_logo",
+            "away_logo",
+            "score",
+            "date",
+            "time",
+            "status",
+            "record",
+            "ranking",
+            "odds"
+          ],
+          "additionalProperties": false
+        },
+        "period_text": {
+          "type": "object",
+          "title": "Period/Inning Text",
+          "description": "Customize the period/inning display font",
+          "properties": {
+            "font": {
+              "x-advanced": true,
+              "type": "string",
+              "default": "PressStart2P-Regular.ttf",
+              "description": "Font family for period/inning text"
+            },
+            "font_size": {
+              "x-advanced": true,
+              "type": "integer",
+              "default": 8,
+              "description": "Font size for period/inning text"
+            },
+            "text_color": {
+              "type": "array",
+              "title": "Text Color",
+              "description": "Colour [R, G, B] for the period text on scroll/Vegas cards.",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "minItems": 3,
+              "maxItems": 3,
+              "default": [
+                255,
+                255,
+                255
+              ],
+              "x-advanced": true
+            }
+          },
+          "additionalProperties": false
+        },
+        "team_name": {
+          "type": "object",
+          "title": "Team Name Text",
+          "description": "Customize the team name/abbreviation display",
+          "properties": {
+            "font": {
+              "x-advanced": true,
+              "type": "string",
+              "default": "PressStart2P-Regular.ttf",
+              "description": "Font family for team name text"
+            },
+            "font_size": {
+              "x-advanced": true,
+              "type": "integer",
+              "default": 8,
+              "description": "Font size for team name text"
+            },
+            "text_color": {
+              "type": "array",
+              "title": "Text Color",
+              "description": "Colour [R, G, B] for the team name on scroll/Vegas cards.",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "minItems": 3,
+              "maxItems": 3,
+              "default": [
+                255,
+                255,
+                255
+              ],
+              "x-advanced": true
+            }
+          },
+          "additionalProperties": false
+        },
+        "rank_text": {
+          "type": "object",
+          "title": "Ranking Text",
+          "description": "Customize the ranking display font",
+          "properties": {
+            "font": {
+              "x-advanced": true,
+              "type": "string",
+              "default": "PressStart2P-Regular.ttf",
+              "description": "Font family for ranking text"
+            },
+            "font_size": {
+              "x-advanced": true,
+              "type": "integer",
+              "default": 10,
+              "description": "Font size for ranking text"
+            },
+            "text_color": {
+              "type": "array",
+              "title": "Text Color",
+              "description": "Colour [R, G, B] for the rank text on scroll/Vegas cards.",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "minItems": 3,
+              "maxItems": 3,
+              "default": [
+                255,
+                255,
+                255
+              ],
+              "x-advanced": true
+            }
+          },
+          "additionalProperties": false
+        },
+        "bases": {
+          "type": "object",
+          "title": "Bases Diamond",
+          "description": "Customize the base diamond indicators",
+          "properties": {
+            "diamond_size": {
+              "x-advanced": true,
+              "type": "integer",
+              "default": 7,
+              "minimum": 3,
+              "maximum": 15,
+              "description": "Size of each base diamond in pixels"
+            },
+            "occupied_color": {
+              "x-advanced": true,
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "default": [
+                255,
+                255,
+                255
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "description": "Color when a base is occupied (RGB)"
+            },
+            "empty_color": {
+              "x-advanced": true,
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "default": [
+                255,
+                255,
+                255
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "description": "Outline color when a base is empty (RGB)"
+            },
+            "x_offset": {
+              "x-advanced": true,
+              "type": "integer",
+              "default": 0,
+              "minimum": -50,
+              "maximum": 50,
+              "description": "Horizontal offset for the bases cluster (positive = right)"
+            },
+            "y_offset": {
+              "x-advanced": true,
+              "type": "integer",
+              "default": 0,
+              "minimum": -50,
+              "maximum": 50,
+              "description": "Vertical offset for the bases cluster (positive = down)"
+            }
+          },
+          "additionalProperties": false
+        },
+        "outs": {
+          "type": "object",
+          "title": "Outs Circles",
+          "description": "Customize the outs indicator circles",
+          "properties": {
+            "circle_diameter": {
+              "x-advanced": true,
+              "type": "integer",
+              "default": 3,
+              "minimum": 2,
+              "maximum": 10,
+              "description": "Diameter of each out circle in pixels"
+            },
+            "counted_color": {
+              "x-advanced": true,
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "default": [
+                255,
+                255,
+                255
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "description": "Fill color for counted outs (RGB)"
+            },
+            "empty_color": {
+              "x-advanced": true,
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "default": [
+                100,
+                100,
+                100
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "description": "Outline color for remaining outs (RGB)"
+            },
+            "spacing": {
+              "x-advanced": true,
+              "type": "integer",
+              "default": 2,
+              "minimum": 0,
+              "maximum": 10,
+              "description": "Vertical spacing between out circles in pixels"
+            },
+            "distance_from_bases": {
+              "x-advanced": true,
+              "type": "integer",
+              "default": 3,
+              "minimum": 0,
+              "maximum": 15,
+              "description": "Horizontal distance from the bases cluster in pixels"
+            }
+          },
+          "additionalProperties": false
+        },
+        "count": {
+          "type": "object",
+          "title": "Balls-Strikes Count",
+          "description": "Customize the balls-strikes count text",
+          "properties": {
+            "text_color": {
+              "x-advanced": true,
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "default": [
+                255,
+                255,
+                255
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "description": "Color for the count text (RGB)"
+            },
+            "y_offset": {
+              "x-advanced": true,
+              "type": "integer",
+              "default": 2,
+              "minimum": 0,
+              "maximum": 20,
+              "description": "Pixels below the base cluster"
+            }
+          },
+          "additionalProperties": false
+        },
+        "at_bat_info": {
+          "type": "object",
+          "title": "Pitcher / Batter Player Card",
+          "description": "A dedicated full-screen view (not an overlay on the scorebug -- there is not enough room there) that periodically rotates into the live display for whoever is at the plate and on the mound. By default it is drawn as a baseball card: headshot, a NOW BATTING / NOW PITCHING banner, the player's name, season stats, team and number, age and bat/throw hand, hometown, and height/weight -- with the panel keeping as many of those rows as it has room for. Set style to 'text' for the original plain pitcher/batter line-up. On by default for MLB and NCAA Baseball; turn it off per league with Display Options > Show Now Batting / Now Pitching (not available for ABL, which has no ESPN play-by-play).",
+          "properties": {
+            "style": {
+              "type": "string",
+              "title": "Style",
+              "enum": [
+                "card",
+                "text"
+              ],
+              "default": "card",
+              "description": "How this screen is drawn. 'card' is a full baseball card for one player at a time -- headshot, banner, name, season stats, team/number/position, age and bat/throw, hometown, height/weight -- dropping the least important rows on panels too small to fit them all. 'text' is the original layout: a 'Pitcher: X' line, a 'Batter: Y' line and the last-play code. Card style needs the extra ESPN athlete lookup and is unavailable for ABL; when no bio has resolved yet it falls back to the text layout on its own rather than drawing an empty card."
+            },
+            "show_batter": {
+              "type": "boolean",
+              "title": "Show Batter Card",
+              "default": true,
+              "description": "Card style only. Include a card for the current batter"
+            },
+            "show_pitcher": {
+              "type": "boolean",
+              "title": "Show Pitcher Card",
+              "default": true,
+              "description": "Card style only. Include a card for the current pitcher. With both on, each card gets its own dwell_seconds -- batter first -- so one rotation shows both cards instead of making the pitcher wait for the screen to come round again."
+            },
+            "show_headshot": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": true,
+              "description": "Card style only. Draw the player's ESPN headshot on the left of the card, framed in their team's colour. Hidden automatically on panels narrower than 96 pixels or shorter than 32, and whenever the image has not been cached yet -- the card then uses the full width for text"
+            },
+            "show_stats": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": true,
+              "description": "Card style only. Include the season stat line (AVG/HR/RBI for a hitter, ERA/K/WHIP for a pitcher -- ESPN picks the set that suits the position). Trailing stats are dropped whole on a narrow panel rather than cut part-way through a number"
+            },
+            "show_bio_details": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": true,
+              "description": "Card style only. Include the trivia rows -- age and bat/throw hand, hometown, height/weight and seasons played. These are the first rows a short panel drops anyway; turn this off to keep a tall panel to the name, stats and team"
+            },
+            "header_bar": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": true,
+              "description": "Card style only. Draw the NOW BATTING / NOW PITCHING banner as black text knocked out of a solid team-colour bar instead of plain coloured text. Only applies on panels 48 pixels tall or more, where the banner row is tall enough for it to read"
+            },
+            "font": {
+              "x-advanced": true,
+              "type": "string",
+              "default": "9x15.bdf",
+              "description": "Font for this screen's text -- a clean, bold bitmap font that auto-fits as large as the display and each line's actual text allows (falling back to a smaller same-family font, e.g. on a narrow display or with a long player name, down to as small as '4x6-font.ttf' -- ('four_by_six') was previously the flat default here, but it renders 'B' and '8' almost identically, making last-play codes like 'BB' misreadable as '88'; the fallback ladder never steps down to it for this reason). A fixed-size .bdf font always renders at its own native pixel size regardless of font_size below; use a scalable .ttf font (e.g. 'press_start') if you want font_size to directly control the size."
+            },
+            "font_size": {
+              "x-advanced": true,
+              "type": "integer",
+              "default": 24,
+              "minimum": 6,
+              "maximum": 24,
+              "description": "Maximum font size cap, for scalable .ttf fonts only (ignored by fixed-size .bdf fonts like the default). This screen auto-fits the largest text that still fits every line, so the default effectively means 'as big as the display and text allow' -- lower it to force a smaller, more consistent size."
+            },
+            "use_team_colors": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": true,
+              "description": "Colour the card's banner, name and headshot frame (and, in text style, the pitcher and batter lines) with the real ESPN team colour -- the fielding team for the pitcher, the batting team for the hitter -- instead of the flat pitcher_color/batter_color below. Falls back to those flat colours when off, or when a team's colour isn't available."
+            },
+            "pitcher_color": {
+              "x-advanced": true,
+              "type": "array",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "default": [
+                255,
+                255,
+                255
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "description": "Text colour [R, G, B] for the pitcher's banner and name when use_team_colors is off or the fielding team's colour is unavailable"
+            },
+            "batter_color": {
+              "x-advanced": true,
+              "type": "array",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "default": [
+                255,
+                255,
+                0
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "description": "Text colour [R, G, B] for the batter's banner and name when use_team_colors is off or the batting team's colour is unavailable"
+            },
+            "last_play_color": {
+              "x-advanced": true,
+              "type": "array",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "default": [
+                0,
+                255,
+                255
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "description": "Text colour [R, G, B] for the last-play code line in text style. The card shows the code in the banner instead, in the banner's own colour"
+            },
+            "text_color": {
+              "x-advanced": true,
+              "type": "array",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "default": [
+                255,
+                255,
+                255
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "description": "Card style only. Text colour [R, G, B] for the team / number / position row"
+            },
+            "stat_color": {
+              "x-advanced": true,
+              "type": "array",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "default": [
+                0,
+                220,
+                255
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "description": "Card style only. Text colour [R, G, B] for the season stat line"
+            },
+            "detail_color": {
+              "x-advanced": true,
+              "type": "array",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "default": [
+                170,
+                170,
+                170
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "description": "Card style only. Text colour [R, G, B] for the quieter trivia rows -- age and bat/throw, hometown, height/weight"
+            },
+            "dwell_seconds": {
+              "type": "number",
+              "title": "Seconds Per Card",
+              "default": 4,
+              "minimum": 2,
+              "maximum": 15,
+              "description": "How many seconds each Now Batting / Now Pitching card stays on screen. In card style with both players on, each card gets this long -- batter first, then pitcher -- so the screen stays up for twice this time. In text style, how long the screen stays each time it rotates in"
+            },
+            "interval_seconds": {
+              "type": "number",
+              "title": "Show Every (Seconds)",
+              "default": 30,
+              "minimum": 10,
+              "maximum": 120,
+              "description": "How often (in seconds, counted from when the cards last appeared) the Now Batting / Now Pitching cards rotate into the live view. The default of 30 matches the default live_game_duration, so each live game gets one pass of the cards -- 8 seconds for both cards, then 22 seconds of scoreboard"
+            },
+            "favorites_only": {
+              "title": "Favorite Teams Only",
+              "type": "boolean",
+              "default": false,
+              "description": "Only rotate this screen in for games involving one of this league's favorite_teams. Useful if show_all_live is on (so every team's live game rotates through) but you only want the pitcher/batter/last-play treatment for your own team -- other teams still get the normal compact scorebug. Has no effect if favorite_teams is empty."
+            }
+          },
+          "additionalProperties": false
+        },
+        "player_card": {
+          "type": "object",
+          "title": "Player Card Screen",
+          "description": "A dedicated full-screen player card that periodically rotates into the live display for the current batter (and optionally pitcher): headshot image, jersey number, position, bat/throw hand, and season stats (AVG/HR/RBI for hitters, ERA/W-L/K for pitchers). Enable per-league via Display Options > Show Player Card (MLB and NCAA Baseball only -- ABL has no ESPN player data). On tiny panels (e.g. 64x32) the headshot is hidden and the card shows compact text.",
+          "properties": {
+            "font": {
+              "x-advanced": true,
+              "type": "string",
+              "default": "9x15.bdf",
+              "description": "Font for the card's text -- a clean, bold bitmap font that auto-fits the largest size the panel and text allow. A fixed-size .bdf font renders at its native pixel size regardless of font_size; use a scalable .ttf font (e.g. 'press_start') if you want font_size to control the size."
+            },
+            "font_size": {
+              "x-advanced": true,
+              "type": "integer",
+              "default": 24,
+              "minimum": 6,
+              "maximum": 24,
+              "description": "Maximum font size cap, for scalable .ttf fonts only (ignored by fixed-size .bdf fonts like the default). The card auto-fits within the space beside the headshot, so the default effectively means 'as big as fits' -- lower it to force a smaller size."
+            },
+            "show_batter": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": true,
+              "description": "Show a card for the current batter"
+            },
+            "show_pitcher": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": false,
+              "description": "Also show a card for the current pitcher (the batter is preferred when both are available)"
+            },
+            "use_team_colors": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": true,
+              "description": "Color the player's name with their real ESPN team color instead of the flat text_color"
+            },
+            "use_team_colors_border": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": true,
+              "description": "Draw the headshot's frame in the player's team color instead of the flat border_color below"
+            },
+            "border_color": {
+              "x-advanced": true,
+              "type": "array",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "default": [
+                255,
+                200,
+                0
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "description": "Headshot frame color [R, G, B] when use_team_colors_border is off or the team color is unavailable"
+            },
+            "text_color": {
+              "x-advanced": true,
+              "type": "array",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "default": [
+                255,
+                255,
+                255
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "description": "Text color [R, G, B] for the name (when team colors are off) and the jersey/position/bat-throw line"
+            },
+            "stat_color": {
+              "x-advanced": true,
+              "type": "array",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "default": [
+                0,
+                220,
+                255
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "description": "Text color [R, G, B] for the season-stats line"
+            },
+            "dwell_seconds": {
+              "x-advanced": true,
+              "type": "number",
+              "default": 6,
+              "minimum": 2,
+              "maximum": 20,
+              "description": "How many seconds to show the card each time it rotates in"
+            },
+            "interval_seconds": {
+              "x-advanced": true,
+              "type": "number",
+              "default": 40,
+              "minimum": 10,
+              "maximum": 180,
+              "description": "How often (in seconds) the card rotates into the normal live view"
+            },
+            "favorites_only": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": false,
+              "description": "Only rotate the card in for games involving one of this league's favorite_teams. Has no effect if favorite_teams is empty."
+            }
+          },
+          "additionalProperties": false
+        },
+        "traditional_scoreboard": {
+          "type": "object",
+          "title": "Traditional Scoreboard Screen",
+          "description": "A dedicated full-screen view (like an outfield ballpark scoreboard) that periodically rotates into the live display: an inning-by-inning line score with R/H/E, and an At Bat panel with ball/strike/out indicators. Enable per-league via Display Options > Show Traditional Scoreboard (MLB and NCAA Baseball only).",
+          "properties": {
+            "font": {
+              "x-advanced": true,
+              "type": "string",
+              "default": "9x15.bdf",
+              "description": "Font for this screen's text. '9x15.bdf' is a clean, bold, highly legible bitmap font. Fixed-size bitmap (.bdf) fonts always render at their own native pixel size regardless of font_size below; use a scalable .ttf font (e.g. 'press_start' for PressStart2P, a chunkier 8-bit retro look) if you want font_size to control the size"
+            },
+            "font_size": {
+              "x-advanced": true,
+              "type": "integer",
+              "default": 24,
+              "minimum": 6,
+              "maximum": 24,
+              "description": "Maximum font size cap, for scalable .ttf fonts only (ignored by fixed-size .bdf fonts like the default). This screen auto-fits the largest text that still leaves room for the At Bat panel (when applicable), so the default (24) effectively means 'as big as the display allows' -- lower this to force a smaller, more consistent size instead"
+            },
+            "use_team_colors": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": true,
+              "description": "Color each team's abbreviation using their real team colors (from ESPN) instead of a single flat text color"
+            },
+            "show_team_color_backgrounds": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": true,
+              "description": "Tint each team's row with a subtle (~12% brightness) wash of their real ESPN team color, plus a solid team-color accent strip on the left edge -- a colorful ballpark look. Requires use_team_colors; a team with no ESPN color gets no tint. Text stays legible (it is drawn with a black outline over the wash)."
+            },
+            "show_logos": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": true,
+              "description": "Show a small team logo beside each abbreviation, but only when there's leftover width to spare -- never at the cost of a displayed inning or the At Bat side panel"
+            },
+            "text_color": {
+              "x-advanced": true,
+              "type": "array",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "default": [
+                255,
+                255,
+                255
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "description": "Text color [R, G, B] for score digits, and for team abbreviations when team colors are off or unavailable"
+            },
+            "header_color": {
+              "x-advanced": true,
+              "type": "array",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "default": [
+                180,
+                180,
+                180
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "description": "Text color [R, G, B] for the inning-number and R/H/E header row"
+            },
+            "highlight_color": {
+              "x-advanced": true,
+              "type": "array",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "default": [
+                255,
+                140,
+                0
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "description": "Accent color [R, G, B] for the current-inning highlight, the At Bat label, and lit ball/strike/out indicators"
+            },
+            "show_dividers": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": true,
+              "description": "Draw thin 1px grid lines between innings, rows, and the R/H/E columns for readability"
+            },
+            "game_scope": {
+              "x-advanced": true,
+              "type": "string",
+              "enum": [
+                "live",
+                "recent",
+                "both"
+              ],
+              "default": "both",
+              "description": "Which games this screen rotates in for: 'live' only during live action, 'recent' only for final/completed games (handy for seeing the winner and full line score at a glance), or 'both'"
+            },
+            "favorites_only": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": false,
+              "description": "Only rotate this screen in for games involving one of this league's favorite_teams. Useful if show_all_live is on (so every team's live game rotates through) but you only want the full-screen treatment for your own team -- other teams still get the normal compact scorebug. Has no effect if favorite_teams is empty."
+            },
+            "divider_color": {
+              "x-advanced": true,
+              "type": "array",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "default": [
+                90,
+                90,
+                90
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "description": "Color [R, G, B] for the grid divider lines"
+            },
+            "highlight_winner": {
+              "x-advanced": true,
+              "type": "boolean",
+              "default": true,
+              "description": "On a final game, color the winning team's run total in winner_color so the winner is obvious at a glance instead of having to compare both R values yourself"
+            },
+            "winner_color": {
+              "x-advanced": true,
+              "type": "array",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "default": [
+                0,
+                200,
+                0
+              ],
+              "minItems": 3,
+              "maxItems": 3,
+              "description": "Color [R, G, B] for the winning team's run total on a final game"
+            },
+            "dwell_seconds": {
+              "x-advanced": true,
+              "type": "number",
+              "default": 6,
+              "minimum": 2,
+              "maximum": 20,
+              "description": "How many seconds to show this screen each time it rotates in"
+            },
+            "interval_seconds": {
+              "x-advanced": true,
+              "type": "number",
+              "default": 30,
+              "minimum": 10,
+              "maximum": 180,
+              "description": "How often (in seconds) this screen rotates into the normal live view"
+            }
+          },
+          "additionalProperties": false
+        },
+        "favorite_result_colors": {
+          "type": "object",
+          "title": "Favorite Team Result Colors",
+          "description": "Color the final score of a recent game by how your favorite team did. Most useful in scroll and Vegas modes, where the same matchup can go past several times and the logos alone do not tell you who won.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "title": "Color Scores by Result",
+              "description": "Show the final score in green when your favorite team won and red when it lost. Games without exactly one favorite team - neither side, or both - keep the normal score color.",
+              "default": false
+            },
+            "win_color": {
+              "type": "array",
+              "title": "Win Color",
+              "description": "Score color [R, G, B] when your favorite team won",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "minItems": 3,
+              "maxItems": 3,
+              "default": [
+                0,
+                255,
+                0
+              ],
+              "x-advanced": true
+            },
+            "loss_color": {
+              "type": "array",
+              "title": "Loss Color",
+              "description": "Score color [R, G, B] when your favorite team lost",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "minItems": 3,
+              "maxItems": 3,
+              "default": [
+                255,
+                0,
+                0
+              ],
+              "x-advanced": true
+            },
+            "tie_color": {
+              "type": "array",
+              "title": "Tie Color",
+              "description": "Score color [R, G, B] when the game ended level",
+              "x-widget": "color-picker",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "minItems": 3,
+              "maxItems": 3,
+              "default": [
+                255,
+                200,
+                0
+              ],
+              "x-advanced": true
+            }
+          },
+          "x-propertyOrder": [
+            "enabled",
+            "win_color",
+            "loss_color",
+            "tie_color"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "x-propertyOrder": [
+        "score_text",
+        "period_text",
+        "team_name",
+        "status_text",
+        "detail_text",
+        "odds_text",
+        "rank_text",
+        "layout",
+        "bases",
+        "outs",
+        "count",
+        "at_bat_info",
+        "player_card",
+        "traditional_scoreboard",
+        "favorite_result_colors"
+      ],
+      "additionalProperties": false
+    },
+    "schedule_lookback_days": {
+      "type": "integer",
+      "default": 14,
+      "minimum": 1,
+      "maximum": 60,
+      "title": "Schedule lookback (days)",
+      "description": "How far back to fetch games for the Recent screen. Raise it if finished games disappear sooner than you want.",
+      "x-advanced": true
+    },
+    "schedule_lookahead_days": {
+      "type": "integer",
+      "default": 7,
+      "minimum": 1,
+      "maximum": 60,
+      "title": "Schedule lookahead (days)",
+      "description": "How far ahead to fetch games for the Upcoming screen. Raise it for a league that plays weekly: a fixture just beyond this horizon is not fetched at all, so it never reaches the board even though the date is known.",
+      "x-advanced": true
+    },
+    "no_data_interval_seconds": {
+      "type": "integer",
+      "default": 300,
+      "minimum": 5,
+      "maximum": 86400,
+      "title": "Idle live-check interval (seconds)",
+      "description": "How long to wait between checks for live games when there are none. Backs off further the longer nothing is found, up to the cap below.",
+      "x-advanced": true
+    },
+    "live_idle_max_interval_seconds": {
+      "type": "integer",
+      "default": 900,
+      "minimum": 5,
+      "maximum": 86400,
+      "title": "Maximum idle live-check interval (seconds)",
+      "description": "Ceiling for the back-off above. Raise it to poll an out-of-season league even less; lower it to notice the first game after a quiet spell sooner.",
+      "x-advanced": true
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "enabled"
+  ]
+}

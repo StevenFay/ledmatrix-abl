@@ -1,0 +1,311 @@
+{
+ "abl_schedule_2026": {
+  "events": [
+   {
+    "id": "900001",
+    "date": "2026-11-20T07:00:00Z",
+    "name": "Brisbane Bandits at Sydney Blue Sox",
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "team": {
+         "id": "4069",
+         "abbreviation": "SYD",
+         "name": "Sydney Blue Sox",
+         "displayName": "Sydney Blue Sox",
+         "shortDisplayName": "Sydney",
+         "logo": "https://midfield.mlbstatic.com/v1/team/4069/spots/96"
+        },
+        "score": "11",
+        "records": [
+         {
+          "summary": "1-0"
+         }
+        ],
+        "id": "4069"
+       },
+       {
+        "homeAway": "away",
+        "team": {
+         "id": "4065",
+         "abbreviation": "BRI",
+         "name": "Brisbane Bandits",
+         "displayName": "Brisbane Bandits",
+         "shortDisplayName": "Brisbane",
+         "logo": "https://midfield.mlbstatic.com/v1/team/4065/spots/96"
+        },
+        "score": "1",
+        "records": [
+         {
+          "summary": "0-1"
+         }
+        ],
+        "id": "4065"
+       }
+      ],
+      "status": {
+       "type": {
+        "name": "STATUS_FINAL",
+        "state": "post",
+        "detail": "Final",
+        "shortDetail": "Final",
+        "completed": true
+       },
+       "period": 9,
+       "displayClock": "0:00"
+      },
+      "situation": {},
+      "odds": [],
+      "series": {}
+     }
+    ]
+   },
+   {
+    "id": "900002",
+    "date": "2026-11-20T08:30:00Z",
+    "name": "Perth Heat at Adelaide Giants",
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "team": {
+         "id": "4064",
+         "abbreviation": "ADE",
+         "name": "Adelaide Giants",
+         "displayName": "Adelaide Giants",
+         "shortDisplayName": "Adelaide",
+         "logo": "https://midfield.mlbstatic.com/v1/team/4064/spots/96"
+        },
+        "score": "6",
+        "records": [
+         {
+          "summary": "1-0"
+         }
+        ],
+        "id": "4064"
+       },
+       {
+        "homeAway": "away",
+        "team": {
+         "id": "4068",
+         "abbreviation": "PER",
+         "name": "Perth Heat",
+         "displayName": "Perth Heat",
+         "shortDisplayName": "Perth",
+         "logo": "https://midfield.mlbstatic.com/v1/team/4068/spots/96"
+        },
+        "score": "0",
+        "records": [
+         {
+          "summary": "0-1"
+         }
+        ],
+        "id": "4068"
+       }
+      ],
+      "status": {
+       "type": {
+        "name": "STATUS_FINAL",
+        "state": "post",
+        "detail": "Final",
+        "shortDetail": "Final",
+        "completed": true
+       },
+       "period": 9,
+       "displayClock": "0:00"
+      },
+      "situation": {},
+      "odds": [],
+      "series": {}
+     }
+    ]
+   },
+   {
+    "id": "900003",
+    "date": "2026-11-21T01:00:00Z",
+    "name": "Perth Heat at Adelaide Giants",
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "team": {
+         "id": "4064",
+         "abbreviation": "ADE",
+         "name": "Adelaide Giants",
+         "displayName": "Adelaide Giants",
+         "shortDisplayName": "Adelaide",
+         "logo": "https://midfield.mlbstatic.com/v1/team/4064/spots/96"
+        },
+        "score": "16",
+        "records": [
+         {
+          "summary": "2-0"
+         }
+        ],
+        "id": "4064"
+       },
+       {
+        "homeAway": "away",
+        "team": {
+         "id": "4068",
+         "abbreviation": "PER",
+         "name": "Perth Heat",
+         "displayName": "Perth Heat",
+         "shortDisplayName": "Perth",
+         "logo": "https://midfield.mlbstatic.com/v1/team/4068/spots/96"
+        },
+        "score": "9",
+        "records": [
+         {
+          "summary": "1-1"
+         }
+        ],
+        "id": "4068"
+       }
+      ],
+      "status": {
+       "type": {
+        "name": "STATUS_FINAL",
+        "state": "post",
+        "detail": "Final",
+        "shortDetail": "Final",
+        "completed": true
+       },
+       "period": 7,
+       "displayClock": "0:00"
+      },
+      "situation": {},
+      "odds": [],
+      "series": {}
+     }
+    ]
+   },
+   {
+    "id": "900005",
+    "date": "2026-11-21T08:00:00Z",
+    "name": "Perth Heat at Adelaide Giants",
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "team": {
+         "id": "4064",
+         "abbreviation": "ADE",
+         "name": "Adelaide Giants",
+         "displayName": "Adelaide Giants",
+         "shortDisplayName": "Adelaide",
+         "logo": "https://midfield.mlbstatic.com/v1/team/4064/spots/96"
+        },
+        "score": "0",
+        "records": [
+         {
+          "summary": "2-0"
+         }
+        ],
+        "id": "4064"
+       },
+       {
+        "homeAway": "away",
+        "team": {
+         "id": "4068",
+         "abbreviation": "PER",
+         "name": "Perth Heat",
+         "displayName": "Perth Heat",
+         "shortDisplayName": "Perth",
+         "logo": "https://midfield.mlbstatic.com/v1/team/4068/spots/96"
+        },
+        "score": "0",
+        "records": [
+         {
+          "summary": "1-1"
+         }
+        ],
+        "id": "4068"
+       }
+      ],
+      "status": {
+       "type": {
+        "name": "STATUS_SCHEDULED",
+        "state": "pre",
+        "detail": "Scheduled",
+        "shortDetail": "Scheduled",
+        "completed": false
+       },
+       "period": 1,
+       "displayClock": "0:00"
+      },
+      "situation": {},
+      "odds": [],
+      "series": {}
+     }
+    ]
+   },
+   {
+    "id": "900006",
+    "date": "2026-11-22T03:00:00Z",
+    "name": "Brisbane Bandits at Sydney Blue Sox",
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "team": {
+         "id": "4069",
+         "abbreviation": "SYD",
+         "name": "Sydney Blue Sox",
+         "displayName": "Sydney Blue Sox",
+         "shortDisplayName": "Sydney",
+         "logo": "https://midfield.mlbstatic.com/v1/team/4069/spots/96"
+        },
+        "score": "0",
+        "records": [
+         {
+          "summary": "1-0"
+         }
+        ],
+        "id": "4069"
+       },
+       {
+        "homeAway": "away",
+        "team": {
+         "id": "4065",
+         "abbreviation": "BRI",
+         "name": "Brisbane Bandits",
+         "displayName": "Brisbane Bandits",
+         "shortDisplayName": "Brisbane",
+         "logo": "https://midfield.mlbstatic.com/v1/team/4065/spots/96"
+        },
+        "score": "0",
+        "records": [
+         {
+          "summary": "0-1"
+         }
+        ],
+        "id": "4065"
+       }
+      ],
+      "status": {
+       "type": {
+        "name": "STATUS_SCHEDULED",
+        "state": "pre",
+        "detail": "Scheduled",
+        "shortDetail": "Scheduled",
+        "completed": false
+       },
+       "period": 1,
+       "displayClock": "0:00"
+      },
+      "situation": {},
+      "odds": [],
+      "series": {}
+     }
+    ]
+   }
+  ]
+ }
+}
